@@ -112,7 +112,7 @@ const char *spinel_type_cname(spinel_type_t k) {
     case SPINEL_TYPE_BOOLEAN: return "mrb_bool";
     case SPINEL_TYPE_ARRAY:   return "sp_IntArray *";
     case SPINEL_TYPE_PROC:    return "sp_Val *";
-    default:                  return "mrb_value";
+    default:                  return "mrb_int"; /* fallback for standalone mode */
     }
 }
 
@@ -534,6 +534,12 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         return t;
     }
 
+    /* Chained assignment: zr = zi = 0 — type is type of the value */
+    case PM_LOCAL_VARIABLE_WRITE_NODE: {
+        pm_local_variable_write_node_t *n = (pm_local_variable_write_node_t *)node;
+        return infer_type(ctx, n->value);
+    }
+
     case PM_INSTANCE_VARIABLE_READ_NODE: {
         pm_instance_variable_read_node_t *n = (pm_instance_variable_read_node_t *)node;
         char *ivname = cstr(ctx, n->name);
@@ -712,7 +718,8 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         else if (strcmp(method, "to_f") == 0)
             result = vt_prim(SPINEL_TYPE_FLOAT);
         else if (strcmp(method, "puts") == 0 || strcmp(method, "print") == 0 ||
-                 strcmp(method, "printf") == 0 || strcmp(method, "p") == 0)
+                 strcmp(method, "printf") == 0 || strcmp(method, "putc") == 0 ||
+                 strcmp(method, "p") == 0)
             result = vt_prim(SPINEL_TYPE_NIL);
 
         free(method);
@@ -745,6 +752,13 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
 
     case PM_LAMBDA_NODE:
         return vt_prim(SPINEL_TYPE_PROC);
+
+    case PM_RETURN_NODE: {
+        pm_return_node_t *n = (pm_return_node_t *)node;
+        if (n->arguments && n->arguments->arguments.size > 0)
+            return infer_type(ctx, n->arguments->arguments.nodes[0]);
+        return vt_prim(SPINEL_TYPE_NIL);
+    }
 
     case PM_ARRAY_NODE:
         return vt_prim(SPINEL_TYPE_ARRAY);
@@ -819,9 +833,15 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node) {
             (pm_local_variable_operator_write_node_t *)node;
         infer_pass(ctx, n->value);
         char *name = cstr(ctx, n->name);
-        if (!var_lookup(ctx, name)) {
-            vtype_t type = infer_type(ctx, n->value);
-            var_declare(ctx, name, type, false);
+        /* Always declare/widen: x += float widens x from int to float */
+        vtype_t rhs_type = infer_type(ctx, n->value);
+        var_entry_t *v = var_lookup(ctx, name);
+        if (v) {
+            /* Widen: int += float → float */
+            if (v->type.kind == SPINEL_TYPE_INTEGER && rhs_type.kind == SPINEL_TYPE_FLOAT)
+                v->type = vt_prim(SPINEL_TYPE_FLOAT);
+        } else {
+            var_declare(ctx, name, rhs_type, false);
         }
         free(name);
         break;
@@ -1149,6 +1169,144 @@ static void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                                         }
                                         free(iname);
                                     }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        /* Infer function param types from calls within other function bodies */
+        for (int fi = 0; fi < ctx->func_count; fi++) {
+            func_info_t *caller = &ctx->funcs[fi];
+            if (!caller->body_node) continue;
+            /* Simple recursive scan: find CallNodes in the body */
+            /* Walk statements looking for calls */
+            pm_node_t *body = caller->body_node;
+            if (PM_NODE_TYPE(body) != PM_STATEMENTS_NODE) continue;
+            pm_statements_node_t *bstmts = (pm_statements_node_t *)body;
+            /* Use a simple stack-based walk */
+            pm_node_t *stack[256];
+            int sp = 0;
+            for (size_t si = 0; si < bstmts->body.size && sp < 255; si++)
+                stack[sp++] = bstmts->body.nodes[si];
+            while (sp > 0) {
+                pm_node_t *cur = stack[--sp];
+                if (!cur) continue;
+                if (PM_NODE_TYPE(cur) == PM_CALL_NODE) {
+                    pm_call_node_t *cc = (pm_call_node_t *)cur;
+                    if (!cc->receiver && cc->arguments) {
+                        char *cn2 = cstr(ctx, cc->name);
+                        func_info_t *target = find_func(ctx, cn2);
+                        if (target) {
+                            for (int pi = 0; pi < target->param_count &&
+                                 pi < (int)cc->arguments->arguments.size; pi++) {
+                                if (target->params[pi].type.kind == SPINEL_TYPE_VALUE) {
+                                    /* Register caller params in var table temporarily */
+                                    int sv = ctx->var_count;
+                                    for (int cp = 0; cp < caller->param_count; cp++)
+                                        var_declare(ctx, caller->params[cp].name, caller->params[cp].type, false);
+                                    vtype_t at = infer_type(ctx, cc->arguments->arguments.nodes[pi]);
+                                    ctx->var_count = sv;
+                                    if (at.kind != SPINEL_TYPE_VALUE)
+                                        target->params[pi].type = at;
+                                }
+                            }
+                        }
+                        free(cn2);
+                    }
+                    /* Push receiver and arguments for further scanning */
+                    if (cc->receiver && sp < 255) stack[sp++] = cc->receiver;
+                    if (cc->arguments) {
+                        for (size_t ai = 0; ai < cc->arguments->arguments.size && sp < 255; ai++)
+                            stack[sp++] = cc->arguments->arguments.nodes[ai];
+                    }
+                }
+                /* Recurse into common statement types */
+                if (PM_NODE_TYPE(cur) == PM_IF_NODE) {
+                    pm_if_node_t *ifn = (pm_if_node_t *)cur;
+                    if (ifn->predicate && sp < 255) stack[sp++] = ifn->predicate;
+                    if (ifn->statements && sp < 255) stack[sp++] = (pm_node_t *)ifn->statements;
+                    if (ifn->subsequent && sp < 255) stack[sp++] = (pm_node_t *)ifn->subsequent;
+                }
+                if (PM_NODE_TYPE(cur) == PM_WHILE_NODE) {
+                    pm_while_node_t *wn = (pm_while_node_t *)cur;
+                    if (wn->predicate && sp < 255) stack[sp++] = wn->predicate;
+                    if (wn->statements && sp < 255) stack[sp++] = (pm_node_t *)wn->statements;
+                }
+                if (PM_NODE_TYPE(cur) == PM_STATEMENTS_NODE) {
+                    pm_statements_node_t *ss = (pm_statements_node_t *)cur;
+                    for (size_t si = 0; si < ss->body.size && sp < 255; si++)
+                        stack[sp++] = ss->body.nodes[si];
+                }
+                if (PM_NODE_TYPE(cur) == PM_LOCAL_VARIABLE_WRITE_NODE) {
+                    pm_local_variable_write_node_t *lw = (pm_local_variable_write_node_t *)cur;
+                    if (sp < 255) stack[sp++] = lw->value;
+                }
+                if (PM_NODE_TYPE(cur) == PM_ELSE_NODE) {
+                    pm_else_node_t *en = (pm_else_node_t *)cur;
+                    if (en->statements && sp < 255) stack[sp++] = (pm_node_t *)en->statements;
+                }
+            }
+        }
+
+        /* Also infer return types from function bodies for resolved params */
+        for (int fi = 0; fi < ctx->func_count; fi++) {
+            func_info_t *f = &ctx->funcs[fi];
+            if (f->return_type.kind != SPINEL_TYPE_VALUE) continue;
+            bool all_typed = true;
+            for (int pi = 0; pi < f->param_count; pi++)
+                if (f->params[pi].type.kind == SPINEL_TYPE_VALUE) all_typed = false;
+            if (all_typed && f->body_node) {
+                int sv = ctx->var_count;
+                for (int pi = 0; pi < f->param_count; pi++)
+                    var_declare(ctx, f->params[pi].name, f->params[pi].type, false);
+                /* Run infer_pass to register local variables */
+                infer_pass(ctx, f->body_node);
+                vtype_t rt = infer_type(ctx, f->body_node);
+                ctx->var_count = sv;
+                if (rt.kind != SPINEL_TYPE_VALUE)
+                    f->return_type = rt;
+            }
+        }
+
+        /* Heuristic: for unresolved params, scan body for arithmetic usage */
+        for (int fi = 0; fi < ctx->func_count; fi++) {
+            func_info_t *f = &ctx->funcs[fi];
+            if (!f->body_node) continue;
+            if (PM_NODE_TYPE(f->body_node) != PM_STATEMENTS_NODE) continue;
+            pm_statements_node_t *bstmts = (pm_statements_node_t *)f->body_node;
+            for (int pi = 0; pi < f->param_count; pi++) {
+                if (f->params[pi].type.kind != SPINEL_TYPE_VALUE) continue;
+                /* Scan for `param * N` or `param.to_i` patterns → Float */
+                for (size_t si = 0; si < bstmts->body.size; si++) {
+                    pm_node_t *s = bstmts->body.nodes[si];
+                    if (PM_NODE_TYPE(s) != PM_LOCAL_VARIABLE_WRITE_NODE) continue;
+                    pm_local_variable_write_node_t *lw = (pm_local_variable_write_node_t *)s;
+                    pm_node_t *val = lw->value;
+                    /* Check for (param * N).to_i pattern → param is Float */
+                    if (PM_NODE_TYPE(val) == PM_CALL_NODE) {
+                        pm_call_node_t *vc = (pm_call_node_t *)val;
+                        if (ceq(ctx, vc->name, "to_i") && vc->receiver) {
+                            /* Unwrap parentheses */
+                            pm_node_t *inner = vc->receiver;
+                            while (PM_NODE_TYPE(inner) == PM_PARENTHESES_NODE) {
+                                pm_parentheses_node_t *pn = (pm_parentheses_node_t *)inner;
+                                if (pn->body && PM_NODE_TYPE(pn->body) == PM_STATEMENTS_NODE) {
+                                    pm_statements_node_t *ps = (pm_statements_node_t *)pn->body;
+                                    if (ps->body.size > 0) inner = ps->body.nodes[0]; else break;
+                                } else if (pn->body) { inner = pn->body; }
+                                else break;
+                            }
+                            if (PM_NODE_TYPE(inner) == PM_CALL_NODE) {
+                                pm_call_node_t *mul = (pm_call_node_t *)inner;
+                                if (mul->receiver && PM_NODE_TYPE(mul->receiver) == PM_LOCAL_VARIABLE_READ_NODE) {
+                                    pm_local_variable_read_node_t *lr = (pm_local_variable_read_node_t *)mul->receiver;
+                                    char *vn = cstr(ctx, lr->name);
+                                    if (strcmp(vn, f->params[pi].name) == 0)
+                                        f->params[pi].type = vt_prim(SPINEL_TYPE_FLOAT);
+                                    free(vn);
                                 }
                             }
                         }
@@ -1940,6 +2098,17 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
         return sfmt("0 /* TODO: array expr */");
     }
 
+    /* Chained assignment: zr = zi = 0 — inner write used as expression */
+    case PM_LOCAL_VARIABLE_WRITE_NODE: {
+        pm_local_variable_write_node_t *n = (pm_local_variable_write_node_t *)node;
+        char *name = cstr(ctx, n->name);
+        char *cn = make_cname(name, false);
+        char *val = codegen_expr(ctx, n->value);
+        char *r = sfmt("(%s = %s)", cn, val);
+        free(name); free(cn); free(val);
+        return r;
+    }
+
     default:
         return sfmt("0 /* TODO: expr %d */", PM_NODE_TYPE(node));
     }
@@ -2206,6 +2375,24 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
                     emit(ctx, "printf(\"%%s\", %s);\n", ae);
                     free(ae);
                 }
+            }
+            free(method);
+            break;
+        }
+
+        /* putc: output a single character (integer or string) */
+        if (!call->receiver && strcmp(method, "putc") == 0) {
+            if (call->arguments && call->arguments->arguments.size > 0) {
+                pm_node_t *arg = call->arguments->arguments.nodes[0];
+                vtype_t at = infer_type(ctx, arg);
+                char *ae = codegen_expr(ctx, arg);
+                if (at.kind == SPINEL_TYPE_INTEGER || at.kind == SPINEL_TYPE_FLOAT)
+                    emit(ctx, "putchar((int)%s);\n", ae);
+                else if (at.kind == SPINEL_TYPE_STRING)
+                    emit(ctx, "putchar(%s[0]);\n", ae);
+                else
+                    emit(ctx, "putchar((int)%s);\n", ae);
+                free(ae);
             }
             free(method);
             break;
