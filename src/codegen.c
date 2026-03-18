@@ -226,6 +226,20 @@ static void codegen_stmts(codegen_ctx_t *ctx, pm_node_t *node);
 static char *codegen_lambda(codegen_ctx_t *ctx, pm_lambda_node_t *lam);
 
 /* ------------------------------------------------------------------ */
+/* GC helpers                                                         */
+/* ------------------------------------------------------------------ */
+
+/* Return true if a variable of this type needs GC rooting */
+static bool is_gc_type(codegen_ctx_t *ctx, vtype_t t) {
+    if (t.kind == SPINEL_TYPE_ARRAY) return true;
+    if (t.kind == SPINEL_TYPE_OBJECT) {
+        class_info_t *cls = find_class(ctx, t.klass);
+        return cls && !cls->is_value_type;
+    }
+    return false;
+}
+
+/* ------------------------------------------------------------------ */
 /* Pass 1: Class/Module/Function analysis                             */
 /* ------------------------------------------------------------------ */
 
@@ -1374,6 +1388,25 @@ static void emit_constructor(codegen_ctx_t *ctx, class_info_t *cls) {
 
     if (cls->is_value_type) {
         emit_raw(ctx, "    sp_%s self;\n", cls->name);
+    } else if (ctx->needs_gc) {
+        /* Determine if this class has a scan function */
+        bool has_gc_fields = false;
+        for (int j = 0; j < cls->ivar_count; j++) {
+            ivar_info_t *iv = &cls->ivars[j];
+            if (is_gc_type(ctx, iv->type)) { has_gc_fields = true; break; }
+            if (strcmp(cls->name, "Scene") == 0 && strcmp(iv->name, "spheres") == 0) {
+                class_info_t *sph = find_class(ctx, "Sphere");
+                if (sph && !sph->is_value_type) { has_gc_fields = true; break; }
+            }
+        }
+        emit_raw(ctx, "    SP_GC_SAVE();\n");
+        if (has_gc_fields)
+            emit_raw(ctx, "    sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, sp_%s_gc_scan);\n",
+                     cls->name, cls->name, cls->name, cls->name);
+        else
+            emit_raw(ctx, "    sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, NULL);\n",
+                     cls->name, cls->name, cls->name);
+        emit_raw(ctx, "    SP_GC_ROOT(self);\n");
     } else {
         emit_raw(ctx, "    sp_%s *self = (sp_%s *)calloc(1, sizeof(sp_%s));\n",
                  cls->name, cls->name, cls->name);
@@ -1414,6 +1447,8 @@ static void emit_constructor(codegen_ctx_t *ctx, class_info_t *cls) {
     ctx->current_class = NULL;
 
     /* For Isect: handle special initializations */
+    if (!cls->is_value_type && ctx->needs_gc)
+        emit_raw(ctx, "    SP_GC_RESTORE();\n");
     emit_raw(ctx, "    return self;\n");
     emit_raw(ctx, "}\n\n");
 }
@@ -2266,10 +2301,16 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
         pm_return_node_t *n = (pm_return_node_t *)node;
         if (n->arguments && n->arguments->arguments.size > 0) {
             char *val = codegen_expr(ctx, n->arguments->arguments.nodes[0]);
-            emit(ctx, "return %s;\n", val);
+            if (ctx->gc_scope_active)
+                emit(ctx, "{ SP_GC_RESTORE(); return %s; }\n", val);
+            else
+                emit(ctx, "return %s;\n", val);
             free(val);
         } else {
-            emit(ctx, "return;\n");
+            if (ctx->gc_scope_active)
+                emit(ctx, "{ SP_GC_RESTORE(); return; }\n");
+            else
+                emit(ctx, "return;\n");
         }
         break;
     }
@@ -2586,8 +2627,12 @@ static void codegen_stmts(codegen_ctx_t *ctx, pm_node_t *node) {
                 PM_NODE_TYPE(stmt) != PM_LOCAL_VARIABLE_OPERATOR_WRITE_NODE &&
                 PM_NODE_TYPE(stmt) != PM_BREAK_NODE) {
                 char *val = codegen_expr(ctx, stmt);
-                if (val && strcmp(val, "/* nil */") != 0)
-                    emit(ctx, "return %s;\n", val);
+                if (val && strcmp(val, "/* nil */") != 0) {
+                    if (ctx->gc_scope_active)
+                        emit(ctx, "{ SP_GC_RESTORE(); return %s; }\n", val);
+                    else
+                        emit(ctx, "return %s;\n", val);
+                }
                 free(val);
                 ctx->implicit_return = saved_ir;
                 continue;
@@ -2645,6 +2690,33 @@ static void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m)
     /* Infer local variables from method body */
     if (m->body_node) infer_pass(ctx, m->body_node);
 
+    /* Check if this method needs GC rooting */
+    bool method_has_gc_vars = false;
+    if (ctx->needs_gc) {
+        /* Check self (non-value-type class pointer) */
+        if (!cls->is_value_type) method_has_gc_vars = true;
+        /* Check parameters */
+        for (int i = 0; i < m->param_count && !method_has_gc_vars; i++)
+            if (is_gc_type(ctx, m->params[i].type)) method_has_gc_vars = true;
+        /* Check locals */
+        for (int i = saved_var_count + m->param_count; i < ctx->var_count && !method_has_gc_vars; i++)
+            if (is_gc_type(ctx, ctx->vars[i].type)) method_has_gc_vars = true;
+    }
+
+    bool saved_gc_scope = ctx->gc_scope_active;
+    if (method_has_gc_vars) {
+        emit(ctx, "SP_GC_SAVE();\n");
+        ctx->gc_scope_active = true;
+        /* Root self if it's a GC pointer */
+        if (!cls->is_value_type)
+            emit(ctx, "SP_GC_ROOT(self);\n");
+        /* Root GC-typed parameters */
+        for (int i = 0; i < m->param_count; i++) {
+            if (is_gc_type(ctx, m->params[i].type))
+                emit(ctx, "SP_GC_ROOT(lv_%s);\n", m->params[i].name);
+        }
+    }
+
     /* Emit local variable declarations (skip params — they're function args) */
     for (int i = saved_var_count + m->param_count; i < ctx->var_count; i++) {
         var_entry_t *v = &ctx->vars[i];
@@ -2667,7 +2739,16 @@ static void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m)
             } else {
                 /* Reference type: pointer, initialized to NULL */
                 emit(ctx, "%s *%s = NULL;\n", ct, cn);
+                if (method_has_gc_vars)
+                    emit(ctx, "SP_GC_ROOT(%s);\n", cn);
             }
+            free(ct); free(cn);
+            continue;
+        }
+        else if (v->type.kind == SPINEL_TYPE_ARRAY) {
+            emit(ctx, "%s *%s = NULL;\n", ct, cn);
+            if (method_has_gc_vars)
+                emit(ctx, "SP_GC_ROOT(%s);\n", cn);
             free(ct); free(cn);
             continue;
         }
@@ -2689,6 +2770,8 @@ static void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m)
                 PM_NODE_TYPE(last) != PM_WHILE_NODE &&
                 PM_NODE_TYPE(last) != PM_RETURN_NODE) {
                 char *val = codegen_expr(ctx, last);
+                if (method_has_gc_vars)
+                    emit(ctx, "SP_GC_RESTORE();\n");
                 emit(ctx, "return %s;\n", val);
                 free(val);
             } else {
@@ -2701,6 +2784,10 @@ static void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m)
         codegen_stmts(ctx, m->body_node);
     }
 
+    if (method_has_gc_vars && ret_void)
+        emit_raw(ctx, "    SP_GC_RESTORE();\n");
+
+    ctx->gc_scope_active = saved_gc_scope;
     ctx->indent = saved_indent;
     ctx->var_count = saved_var_count;
     ctx->current_class = NULL;
@@ -2743,14 +2830,45 @@ static void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
 
     if (f->body_node) infer_pass(ctx, f->body_node);
 
+    /* Check if this function needs GC rooting */
+    bool func_has_gc_vars = false;
+    if (ctx->needs_gc) {
+        for (int i = 0; i < f->param_count && !func_has_gc_vars; i++)
+            if (is_gc_type(ctx, f->params[i].type)) func_has_gc_vars = true;
+        for (int i = saved_var_count + f->param_count; i < ctx->var_count && !func_has_gc_vars; i++)
+            if (is_gc_type(ctx, ctx->vars[i].type)) func_has_gc_vars = true;
+    }
+
+    bool saved_gc_scope = ctx->gc_scope_active;
+    if (func_has_gc_vars) {
+        emit(ctx, "SP_GC_SAVE();\n");
+        ctx->gc_scope_active = true;
+        for (int i = 0; i < f->param_count; i++) {
+            if (is_gc_type(ctx, f->params[i].type))
+                emit(ctx, "SP_GC_ROOT(lv_%s);\n", f->params[i].name);
+        }
+    }
+
     for (int i = saved_var_count + f->param_count; i < ctx->var_count; i++) {
         var_entry_t *v = &ctx->vars[i];
         char *ct = vt_ctype(ctx, v->type, false);
         char *cn = make_cname(v->name, v->is_constant);
         if (v->type.kind == SPINEL_TYPE_ARRAY) {
             emit(ctx, "sp_IntArray *%s = NULL;\n", cn);
+            if (func_has_gc_vars)
+                emit(ctx, "SP_GC_ROOT(%s);\n", cn);
             free(ct); free(cn);
             continue;
+        }
+        if (v->type.kind == SPINEL_TYPE_OBJECT) {
+            class_info_t *vc = find_class(ctx, v->type.klass);
+            if (vc && !vc->is_value_type) {
+                emit(ctx, "%s *%s = NULL;\n", ct, cn);
+                if (func_has_gc_vars)
+                    emit(ctx, "SP_GC_ROOT(%s);\n", cn);
+                free(ct); free(cn);
+                continue;
+            }
         }
         const char *init = "";
         if (v->type.kind == SPINEL_TYPE_INTEGER) init = " = 0";
@@ -2772,6 +2890,8 @@ static void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
                 PM_NODE_TYPE(last) != PM_WHILE_NODE &&
                 PM_NODE_TYPE(last) != PM_RETURN_NODE) {
                 char *val = codegen_expr(ctx, last);
+                if (func_has_gc_vars)
+                    emit(ctx, "SP_GC_RESTORE();\n");
                 emit(ctx, "return %s;\n", val);
                 free(val);
             } else {
@@ -2785,6 +2905,10 @@ static void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
         codegen_stmts(ctx, f->body_node);
     }
 
+    if (func_has_gc_vars && ret_void)
+        emit_raw(ctx, "    SP_GC_RESTORE();\n");
+
+    ctx->gc_scope_active = saved_gc_scope;
     ctx->indent = saved_indent;
     ctx->var_count = saved_var_count;
 
@@ -2911,26 +3035,114 @@ static void emit_header(codegen_ctx_t *ctx) {
     emit_raw(ctx, "#ifndef TRUE\n#define TRUE true\n#endif\n");
     emit_raw(ctx, "#ifndef FALSE\n#define FALSE false\n#endif\n\n");
 
+    /* ---- GC runtime (only when needed) ---- */
+    if (ctx->needs_gc) {
+        emit_raw(ctx, "/* ---- Mark-and-sweep GC runtime ---- */\n");
+        emit_raw(ctx, "typedef struct sp_gc_hdr {\n");
+        emit_raw(ctx, "    struct sp_gc_hdr *next;\n");
+        emit_raw(ctx, "    void (*finalize)(void *);\n");
+        emit_raw(ctx, "    void (*scan)(void *);\n");
+        emit_raw(ctx, "    unsigned marked : 1;\n");
+        emit_raw(ctx, "} sp_gc_hdr;\n\n");
+
+        emit_raw(ctx, "static sp_gc_hdr *sp_gc_heap = NULL;\n");
+        emit_raw(ctx, "static size_t sp_gc_bytes = 0;\n");
+        emit_raw(ctx, "static size_t sp_gc_threshold = 256 * 1024;\n\n");
+
+        emit_raw(ctx, "#define SP_GC_STACK_MAX 8192\n");
+        emit_raw(ctx, "static void **sp_gc_roots[SP_GC_STACK_MAX];\n");
+        emit_raw(ctx, "static int sp_gc_nroots = 0;\n");
+        emit_raw(ctx, "#define SP_GC_SAVE() int _gc_saved = sp_gc_nroots\n");
+        emit_raw(ctx, "#define SP_GC_ROOT(v) do { if (sp_gc_nroots < SP_GC_STACK_MAX) sp_gc_roots[sp_gc_nroots++] = (void **)&(v); } while(0)\n");
+        emit_raw(ctx, "#define SP_GC_RESTORE() sp_gc_nroots = _gc_saved\n\n");
+
+        emit_raw(ctx, "static void sp_gc_mark(void *obj) {\n");
+        emit_raw(ctx, "    if (!obj) return;\n");
+        emit_raw(ctx, "    sp_gc_hdr *h = (sp_gc_hdr *)((char *)obj - sizeof(sp_gc_hdr));\n");
+        emit_raw(ctx, "    if (h->marked) return;\n");
+        emit_raw(ctx, "    h->marked = 1;\n");
+        emit_raw(ctx, "    if (h->scan) h->scan(obj);\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static void sp_gc_collect(void) {\n");
+        emit_raw(ctx, "    /* Mark phase: mark all roots */\n");
+        emit_raw(ctx, "    for (int i = 0; i < sp_gc_nroots; i++) {\n");
+        emit_raw(ctx, "        void *obj = *sp_gc_roots[i];\n");
+        emit_raw(ctx, "        if (obj) sp_gc_mark(obj);\n");
+        emit_raw(ctx, "    }\n");
+        emit_raw(ctx, "    /* Sweep phase: free unmarked, reset marks */\n");
+        emit_raw(ctx, "    sp_gc_hdr **pp = &sp_gc_heap;\n");
+        emit_raw(ctx, "    sp_gc_bytes = 0;\n");
+        emit_raw(ctx, "    while (*pp) {\n");
+        emit_raw(ctx, "        sp_gc_hdr *h = *pp;\n");
+        emit_raw(ctx, "        if (!h->marked) {\n");
+        emit_raw(ctx, "            *pp = h->next;\n");
+        emit_raw(ctx, "            if (h->finalize) h->finalize((char *)h + sizeof(sp_gc_hdr));\n");
+        emit_raw(ctx, "            free(h);\n");
+        emit_raw(ctx, "        } else {\n");
+        emit_raw(ctx, "            h->marked = 0;\n");
+        emit_raw(ctx, "            sp_gc_bytes += sizeof(sp_gc_hdr); /* approximate */\n");
+        emit_raw(ctx, "            pp = &h->next;\n");
+        emit_raw(ctx, "        }\n");
+        emit_raw(ctx, "    }\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static void *sp_gc_alloc(size_t sz, void (*finalize)(void *), void (*scan)(void *)) {\n");
+        emit_raw(ctx, "    if (sp_gc_bytes > sp_gc_threshold) {\n");
+        emit_raw(ctx, "        sp_gc_collect();\n");
+        emit_raw(ctx, "        if (sp_gc_bytes > sp_gc_threshold / 2)\n");
+        emit_raw(ctx, "            sp_gc_threshold *= 2;\n");
+        emit_raw(ctx, "    }\n");
+        emit_raw(ctx, "    sp_gc_hdr *h = (sp_gc_hdr *)calloc(1, sizeof(sp_gc_hdr) + sz);\n");
+        emit_raw(ctx, "    h->finalize = finalize;\n");
+        emit_raw(ctx, "    h->scan = scan;\n");
+        emit_raw(ctx, "    h->next = sp_gc_heap;\n");
+        emit_raw(ctx, "    sp_gc_heap = h;\n");
+        emit_raw(ctx, "    sp_gc_bytes += sizeof(sp_gc_hdr) + sz;\n");
+        emit_raw(ctx, "    return (char *)h + sizeof(sp_gc_hdr);\n");
+        emit_raw(ctx, "}\n\n");
+    }
+
     /* Built-in sp_IntArray for Array support */
     emit_raw(ctx, "/* ---- Built-in integer array ---- */\n");
     /* sp_IntArray: deque-like array with O(1) shift via start offset */
     emit_raw(ctx, "typedef struct { mrb_int *data; mrb_int start; mrb_int len; mrb_int cap; } sp_IntArray;\n\n");
 
-    emit_raw(ctx, "static sp_IntArray *sp_IntArray_new(void) {\n");
-    emit_raw(ctx, "    sp_IntArray *a = (sp_IntArray *)calloc(1, sizeof(sp_IntArray));\n");
-    emit_raw(ctx, "    a->cap = 16; a->data = (mrb_int *)malloc(sizeof(mrb_int) * a->cap);\n");
-    emit_raw(ctx, "    return a;\n}\n\n");
+    if (ctx->needs_gc) {
+        /* GC-managed IntArray: finalizer frees internal data pointer */
+        emit_raw(ctx, "static void sp_IntArray_finalize(void *p) {\n");
+        emit_raw(ctx, "    sp_IntArray *a = (sp_IntArray *)p;\n");
+        emit_raw(ctx, "    free(a->data);\n");
+        emit_raw(ctx, "}\n\n");
+
+        emit_raw(ctx, "static sp_IntArray *sp_IntArray_new(void) {\n");
+        emit_raw(ctx, "    sp_IntArray *a = (sp_IntArray *)sp_gc_alloc(sizeof(sp_IntArray), sp_IntArray_finalize, NULL);\n");
+        emit_raw(ctx, "    a->cap = 16; a->data = (mrb_int *)malloc(sizeof(mrb_int) * a->cap);\n");
+        emit_raw(ctx, "    sp_gc_bytes += sizeof(mrb_int) * a->cap;\n");
+        emit_raw(ctx, "    return a;\n}\n\n");
+    } else {
+        emit_raw(ctx, "static sp_IntArray *sp_IntArray_new(void) {\n");
+        emit_raw(ctx, "    sp_IntArray *a = (sp_IntArray *)calloc(1, sizeof(sp_IntArray));\n");
+        emit_raw(ctx, "    a->cap = 16; a->data = (mrb_int *)malloc(sizeof(mrb_int) * a->cap);\n");
+        emit_raw(ctx, "    return a;\n}\n\n");
+    }
 
     emit_raw(ctx, "static sp_IntArray *sp_IntArray_from_range(mrb_int start, mrb_int end) {\n");
     emit_raw(ctx, "    sp_IntArray *a = sp_IntArray_new();\n");
     emit_raw(ctx, "    mrb_int n = end - start + 1; if (n < 0) n = 0;\n");
-    emit_raw(ctx, "    if (n > a->cap) { a->cap = n; a->data = (mrb_int *)realloc(a->data, sizeof(mrb_int) * a->cap); }\n");
+    if (ctx->needs_gc)
+        emit_raw(ctx, "    if (n > a->cap) { sp_gc_bytes += sizeof(mrb_int) * (n - a->cap); a->cap = n; a->data = (mrb_int *)realloc(a->data, sizeof(mrb_int) * a->cap); }\n");
+    else
+        emit_raw(ctx, "    if (n > a->cap) { a->cap = n; a->data = (mrb_int *)realloc(a->data, sizeof(mrb_int) * a->cap); }\n");
     emit_raw(ctx, "    for (mrb_int i = 0; i < n; i++) a->data[i] = start + i;\n");
     emit_raw(ctx, "    a->len = n; return a;\n}\n\n");
 
     emit_raw(ctx, "static sp_IntArray *sp_IntArray_dup(sp_IntArray *a) {\n");
     emit_raw(ctx, "    sp_IntArray *b = sp_IntArray_new();\n");
-    emit_raw(ctx, "    if (a->len > b->cap) { b->cap = a->len; b->data = (mrb_int *)realloc(b->data, sizeof(mrb_int) * b->cap); }\n");
+    if (ctx->needs_gc)
+        emit_raw(ctx, "    if (a->len > b->cap) { sp_gc_bytes += sizeof(mrb_int) * (a->len - b->cap); b->cap = a->len; b->data = (mrb_int *)realloc(b->data, sizeof(mrb_int) * b->cap); }\n");
+    else
+        emit_raw(ctx, "    if (a->len > b->cap) { b->cap = a->len; b->data = (mrb_int *)realloc(b->data, sizeof(mrb_int) * b->cap); }\n");
     emit_raw(ctx, "    memcpy(b->data, a->data + a->start, sizeof(mrb_int) * a->len);\n");
     emit_raw(ctx, "    b->len = a->len; return b;\n}\n\n");
 
@@ -3464,6 +3676,57 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     /* Pass 2c: Re-infer variable types now that function return types are resolved */
     infer_pass(ctx, root);
 
+    /* Detect needs_gc: any non-value-type class or sp_IntArray triggers GC */
+    for (int i = 0; i < ctx->class_count && !ctx->needs_gc; i++) {
+        if (!ctx->classes[i].is_value_type)
+            ctx->needs_gc = true;
+    }
+    for (int i = 0; i < ctx->var_count && !ctx->needs_gc; i++) {
+        if (ctx->vars[i].type.kind == SPINEL_TYPE_ARRAY)
+            ctx->needs_gc = true;
+    }
+    for (int i = 0; i < ctx->func_count && !ctx->needs_gc; i++) {
+        func_info_t *f = &ctx->funcs[i];
+        if (f->return_type.kind == SPINEL_TYPE_ARRAY) { ctx->needs_gc = true; break; }
+        for (int j = 0; j < f->param_count && !ctx->needs_gc; j++)
+            if (f->params[j].type.kind == SPINEL_TYPE_ARRAY) ctx->needs_gc = true;
+        /* Also infer function body variables to detect array usage */
+        if (!ctx->needs_gc && f->body_node) {
+            int saved_vc = ctx->var_count;
+            for (int j = 0; j < f->param_count; j++)
+                var_declare(ctx, f->params[j].name, f->params[j].type, false);
+            infer_pass(ctx, f->body_node);
+            for (int j = saved_vc; j < ctx->var_count; j++) {
+                if (ctx->vars[j].type.kind == SPINEL_TYPE_ARRAY) {
+                    ctx->needs_gc = true;
+                    break;
+                }
+            }
+            ctx->var_count = saved_vc;
+        }
+    }
+    /* Also check class method bodies for array usage */
+    for (int i = 0; i < ctx->class_count && !ctx->needs_gc; i++) {
+        class_info_t *cls = &ctx->classes[i];
+        for (int mi = 0; mi < cls->method_count && !ctx->needs_gc; mi++) {
+            method_info_t *m = &cls->methods[mi];
+            if (m->return_type.kind == SPINEL_TYPE_ARRAY) { ctx->needs_gc = true; break; }
+            if (m->body_node) {
+                int saved_vc = ctx->var_count;
+                for (int j = 0; j < m->param_count; j++)
+                    var_declare(ctx, m->params[j].name, m->params[j].type, false);
+                infer_pass(ctx, m->body_node);
+                for (int j = saved_vc; j < ctx->var_count; j++) {
+                    if (ctx->vars[j].type.kind == SPINEL_TYPE_ARRAY) {
+                        ctx->needs_gc = true;
+                        break;
+                    }
+                }
+                ctx->var_count = saved_vc;
+            }
+        }
+    }
+
     /* Set up lambda output buffer if needed */
     FILE *lambda_buf = NULL;
     char *lambda_buf_data = NULL;
@@ -3499,6 +3762,41 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
     /* Struct definitions */
     for (int i = 0; i < ctx->class_count; i++)
         emit_struct(ctx, &ctx->classes[i]);
+
+    /* GC: emit per-class scan functions for classes with GC-pointer ivars */
+    if (ctx->needs_gc) {
+        for (int i = 0; i < ctx->class_count; i++) {
+            class_info_t *cls = &ctx->classes[i];
+            if (cls->is_value_type) continue;
+
+            /* Check if this class has any GC-pointer ivars */
+            bool has_gc_fields = false;
+            for (int j = 0; j < cls->ivar_count; j++) {
+                ivar_info_t *iv = &cls->ivars[j];
+                if (is_gc_type(ctx, iv->type)) { has_gc_fields = true; break; }
+                /* Special: Scene.spheres is sp_Sphere *[3] */
+                if (strcmp(cls->name, "Scene") == 0 && strcmp(iv->name, "spheres") == 0) {
+                    class_info_t *sph = find_class(ctx, "Sphere");
+                    if (sph && !sph->is_value_type) { has_gc_fields = true; break; }
+                }
+            }
+            if (!has_gc_fields) continue;
+
+            emit_raw(ctx, "static void sp_%s_gc_scan(void *obj) {\n", cls->name);
+            emit_raw(ctx, "    sp_%s *o = (sp_%s *)obj;\n", cls->name, cls->name);
+            for (int j = 0; j < cls->ivar_count; j++) {
+                ivar_info_t *iv = &cls->ivars[j];
+                /* Special: Scene.spheres array */
+                if (strcmp(cls->name, "Scene") == 0 && strcmp(iv->name, "spheres") == 0) {
+                    emit_raw(ctx, "    for (int _i = 0; _i < 3; _i++) sp_gc_mark(o->spheres[_i]);\n");
+                    continue;
+                }
+                if (is_gc_type(ctx, iv->type))
+                    emit_raw(ctx, "    sp_gc_mark(o->%s);\n", iv->name);
+            }
+            emit_raw(ctx, "}\n\n");
+        }
+    }
 
     /* Module code */
     for (int i = 0; i < ctx->module_count; i++)
@@ -3615,6 +3913,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
 
         /* Main function */
         emit_raw(ctx, "int main(int argc, char **argv) {\n");
+        emit_raw(ctx, "    (void)argc; (void)argv;\n");
 
         /* Variable declarations for top-level (skip constants — they're global statics) */
         for (int i = 0; i < ctx->var_count; i++) {
@@ -3628,10 +3927,22 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
             else if (v->type.kind == SPINEL_TYPE_BOOLEAN) init = " = FALSE";
             else if (v->type.kind == SPINEL_TYPE_ARRAY) {
                 emit_raw(ctx, "    sp_IntArray *%s = NULL;\n", cn);
+                if (ctx->needs_gc)
+                    emit_raw(ctx, "    SP_GC_ROOT(%s);\n", cn);
                 free(ct); free(cn);
                 continue;
             }
-            else if (v->type.kind == SPINEL_TYPE_OBJECT) init = "";
+            else if (v->type.kind == SPINEL_TYPE_OBJECT) {
+                class_info_t *vc = find_class(ctx, v->type.klass);
+                if (vc && !vc->is_value_type) {
+                    emit_raw(ctx, "    %s *%s = NULL;\n", ct, cn);
+                    if (ctx->needs_gc)
+                        emit_raw(ctx, "    SP_GC_ROOT(%s);\n", cn);
+                    free(ct); free(cn);
+                    continue;
+                }
+                init = "";
+            }
             emit_raw(ctx, "    %s %s%s;\n", ct, cn, init);
             free(ct); free(cn);
         }

@@ -148,6 +148,11 @@ typedef struct {
     bool lambda_mode;              /* true when fizzbuzz-style lambda code detected */
     FILE *lambda_out;              /* secondary output for lambda function bodies */
 
+    /* GC: true when any non-value-type class or sp_IntArray is used */
+    bool needs_gc;
+    int gc_type_count;  /* number of GC-managed types (for type_id assignment) */
+    bool gc_scope_active; /* true when inside a function with GC roots */
+
     /* Lambda scope stack for capture analysis */
     #define MAX_LAMBDA_DEPTH 64
     #define MAX_SCOPE_VARS 32
