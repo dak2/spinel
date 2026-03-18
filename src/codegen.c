@@ -851,6 +851,9 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
     case PM_TRUE_NODE:
     case PM_FALSE_NODE:    return vt_prim(SPINEL_TYPE_BOOLEAN);
     case PM_NIL_NODE:      return vt_prim(SPINEL_TYPE_NIL);
+    case PM_SOURCE_LINE_NODE: return vt_prim(SPINEL_TYPE_INTEGER);
+    case PM_SOURCE_FILE_NODE: return vt_prim(SPINEL_TYPE_STRING);
+    case PM_DEFINED_NODE:     return vt_prim(SPINEL_TYPE_STRING); /* returns string or nil */
 
     case PM_LOCAL_VARIABLE_READ_NODE: {
         pm_local_variable_read_node_t *n = (pm_local_variable_read_node_t *)node;
@@ -2568,7 +2571,31 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
 
     case PM_TRUE_NODE:  return xstrdup("TRUE");
     case PM_FALSE_NODE: return xstrdup("FALSE");
-    case PM_NIL_NODE:   return xstrdup("/* nil */");
+    case PM_NIL_NODE:   return xstrdup("0 /* nil */");
+
+    case PM_SOURCE_LINE_NODE: {
+        pm_source_line_node_t *n = (pm_source_line_node_t *)node;
+        /* Calculate line number from location offset */
+        pm_line_column_t lc = pm_newline_list_line_column(&ctx->parser->newline_list, n->base.location.start, ctx->parser->start_line);
+        return sfmt("%d", (int)lc.line);
+    }
+
+    case PM_SOURCE_FILE_NODE:
+        return sfmt("\"%s\"", ctx->parser->filepath.source ? (const char *)ctx->parser->filepath.source : "unknown");
+
+    case PM_DEFINED_NODE: {
+        pm_defined_node_t *n = (pm_defined_node_t *)node;
+        /* For local variables: check if defined in var table */
+        if (PM_NODE_TYPE(n->value) == PM_LOCAL_VARIABLE_READ_NODE) {
+            pm_local_variable_read_node_t *lv = (pm_local_variable_read_node_t *)n->value;
+            char *name = cstr(ctx, lv->name);
+            var_entry_t *v = var_lookup(ctx, name);
+            free(name);
+            return xstrdup(v ? "\"local-variable\"" : "NULL");
+        }
+        /* For methods, constants, etc. — conservatively return non-NULL */
+        return xstrdup("\"expression\"");
+    }
 
     case PM_SYMBOL_NODE: {
         pm_symbol_node_t *n = (pm_symbol_node_t *)node;
