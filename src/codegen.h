@@ -29,6 +29,7 @@ typedef enum {
     SPINEL_TYPE_STR_ARRAY, /* sp_StrArray * (string array from split) */
     SPINEL_TYPE_REGEXP,    /* compiled regex pattern (regex_t *) */
     SPINEL_TYPE_RANGE,     /* sp_Range (integer range: first..last) */
+    SPINEL_TYPE_TIME,      /* sp_Time (wraps time_t) */
 } spinel_type_t;
 
 /* Extended type: kind + optional class name for OBJECT types */

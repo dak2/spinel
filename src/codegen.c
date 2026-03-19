@@ -116,6 +116,7 @@ const char *spinel_type_cname(spinel_type_t k) {
     case SPINEL_TYPE_PROC:    return "sp_Val *";
     case SPINEL_TYPE_STR_ARRAY: return "sp_StrArray *";
     case SPINEL_TYPE_RANGE:   return "sp_Range";
+    case SPINEL_TYPE_TIME:    return "sp_Time";
     default:                  return "mrb_int"; /* fallback for standalone mode */
     }
 }
@@ -1030,6 +1031,16 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
             }
         }
 
+        /* Time.now / Time.at → SPINEL_TYPE_TIME */
+        if (call->receiver && PM_NODE_TYPE(call->receiver) == PM_CONSTANT_READ_NODE) {
+            pm_constant_read_node_t *cr = (pm_constant_read_node_t *)call->receiver;
+            if (ceq(ctx, cr->name, "Time") &&
+                (strcmp(method, "now") == 0 || strcmp(method, "at") == 0)) {
+                free(method);
+                return vt_prim(SPINEL_TYPE_TIME);
+            }
+        }
+
         /* Constructor: ClassName.new(...) — check early before binary ops */
         if (strcmp(method, "new") == 0 && call->receiver &&
             PM_NODE_TYPE(call->receiver) == PM_CONSTANT_READ_NODE) {
@@ -1152,6 +1163,11 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                     strcmp(method, ">") == 0 || strcmp(method, "<=") == 0 || strcmp(method, ">=") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
                 if (strcmp(method, "*") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
                 if (strcmp(method, "split") == 0) { free(method); return vt_prim(SPINEL_TYPE_STR_ARRAY); }
+            }
+            /* Time methods on TIME-typed receiver */
+            if (recv_t.kind == SPINEL_TYPE_TIME) {
+                if (strcmp(method, "to_i") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
+                if (strcmp(method, "-") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
             }
             /* Range methods on RANGE-typed receiver */
             if (recv_t.kind == SPINEL_TYPE_RANGE) {
@@ -3431,6 +3447,20 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                         return r;
                     }
                 }
+                /* Time class methods */
+                if (ceq(ctx, cr->name, "Time")) {
+                    if (strcmp(method, "now") == 0) {
+                        free(method);
+                        return xstrdup("sp_Time_now()");
+                    }
+                    if (strcmp(method, "at") == 0 && call->arguments &&
+                        call->arguments->arguments.size == 1) {
+                        char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                        char *r = sfmt("sp_Time_at(%s)", arg);
+                        free(arg); free(method);
+                        return r;
+                    }
+                }
                 /* Rand::rand */
                 if (ceq(ctx, cr->name, "Rand")) {
                     char *r = sfmt("sp_Rand_%s()", method);
@@ -3812,6 +3842,25 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     /* h.keys returns a temporary — but typically used as h.keys.length
                      * which chains to sp_IntArray_length. Handle keys as expression. */
                     r = sfmt("sp_StrIntHash_keys(%s)", recv);
+                }
+                if (r) {
+                    free(recv); free(method);
+                    return r;
+                }
+                free(recv);
+            }
+
+            /* sp_Time method calls */
+            if (recv_t.kind == SPINEL_TYPE_TIME) {
+                char *recv = codegen_expr(ctx, call->receiver);
+                char *r = NULL;
+                if (strcmp(method, "to_i") == 0)
+                    r = sfmt("sp_Time_to_i(%s)", recv);
+                else if (strcmp(method, "-") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_Time_diff(%s, %s)", recv, arg);
+                    free(arg);
                 }
                 if (r) {
                     free(recv); free(method);
@@ -7179,6 +7228,15 @@ static void emit_header(codegen_ctx_t *ctx) {
     emit_raw(ctx, "static sp_IntArray *sp_IntArray_from_range(mrb_int, mrb_int);\n");
     emit_raw(ctx, "static sp_IntArray *sp_Range_to_a(sp_Range r) {\n");
     emit_raw(ctx, "    return sp_IntArray_from_range(r.first, r.last);\n}\n\n");
+
+    /* Built-in sp_Time for Time support */
+    emit_raw(ctx, "/* ---- Built-in time ---- */\n");
+    emit_raw(ctx, "#include <time.h>\n");
+    emit_raw(ctx, "typedef struct { time_t t; } sp_Time;\n");
+    emit_raw(ctx, "static sp_Time sp_Time_now(void) { sp_Time r; r.t = time(NULL); return r; }\n");
+    emit_raw(ctx, "static sp_Time sp_Time_at(mrb_int n) { sp_Time r; r.t = (time_t)n; return r; }\n");
+    emit_raw(ctx, "static mrb_int sp_Time_to_i(sp_Time t) { return (mrb_int)t.t; }\n");
+    emit_raw(ctx, "static mrb_int sp_Time_diff(sp_Time a, sp_Time b) { return (mrb_int)(a.t - b.t); }\n\n");
 
     if (ctx->needs_gc) {
         /* GC-managed IntArray: finalizer frees internal data pointer */
