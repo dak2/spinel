@@ -221,6 +221,43 @@ static char *make_cname(const char *name, bool is_constant) {
     return sfmt("%s%s", is_constant ? "cv_" : "lv_", name);
 }
 
+/* Sanitize Ruby method name to valid C identifier */
+static const char *sanitize_method(const char *name) {
+    static char buf[128];
+    if (strcmp(name, "<=>") == 0) return "_cmp";
+    if (strcmp(name, "==") == 0) return "_eq";
+    if (strcmp(name, "!=") == 0) return "_neq";
+    if (strcmp(name, "<") == 0) return "_lt";
+    if (strcmp(name, ">") == 0) return "_gt";
+    if (strcmp(name, "<=") == 0) return "_le";
+    if (strcmp(name, ">=") == 0) return "_ge";
+    if (strcmp(name, "+") == 0) return "_add";
+    if (strcmp(name, "-") == 0) return "_sub";
+    if (strcmp(name, "*") == 0) return "_mul";
+    if (strcmp(name, "/") == 0) return "_div";
+    if (strcmp(name, "%") == 0) return "_mod";
+    if (strcmp(name, "**") == 0) return "_pow";
+    if (strcmp(name, "<<") == 0) return "_lshift";
+    if (strcmp(name, ">>") == 0) return "_rshift";
+    if (strcmp(name, "|") == 0) return "_bor";
+    if (strcmp(name, "&") == 0) return "_band";
+    if (strcmp(name, "^") == 0) return "_bxor";
+    if (strcmp(name, "~") == 0) return "_bnot";
+    if (strcmp(name, "[]") == 0) return "_aref";
+    if (strcmp(name, "[]=") == 0) return "_aset";
+    if (strcmp(name, "-@") == 0) return "_uminus";
+    if (strcmp(name, "+@") == 0) return "_uplus";
+    /* Replace trailing ? and ! with _p and _bang */
+    size_t len = strlen(name);
+    if (len > 0 && len < sizeof(buf) - 2) {
+        memcpy(buf, name, len + 1);
+        if (buf[len - 1] == '?') { buf[len - 1] = '_'; buf[len] = 'p'; buf[len + 1] = '\0'; }
+        else if (buf[len - 1] == '!') { buf[len - 1] = '_'; buf[len] = 'b'; buf[len + 1] = '\0'; }
+        return buf;
+    }
+    return name;
+}
+
 /* ------------------------------------------------------------------ */
 /* vt_ctype implementation                                            */
 /* ------------------------------------------------------------------ */
