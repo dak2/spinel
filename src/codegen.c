@@ -377,6 +377,7 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node);
 static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node);
 static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node);
 static void codegen_stmts(codegen_ctx_t *ctx, pm_node_t *node);
+static void codegen_pattern_cond(codegen_ctx_t *ctx, pm_node_t *pattern, int case_id);
 static char *codegen_lambda(codegen_ctx_t *ctx, pm_lambda_node_t *lam);
 
 /* Forward declarations for capture analysis (used by both lambda and block codegen) */
@@ -1534,6 +1535,30 @@ static vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
         return result;
     }
 
+    case PM_CASE_MATCH_NODE: {
+        pm_case_match_node_t *n = (pm_case_match_node_t *)node;
+        vtype_t result = vt_prim(SPINEL_TYPE_NIL);
+        for (size_t i = 0; i < n->conditions.size; i++) {
+            pm_node_t *cond = n->conditions.nodes[i];
+            if (PM_NODE_TYPE(cond) == PM_IN_NODE) {
+                pm_in_node_t *in = (pm_in_node_t *)cond;
+                if (in->statements) {
+                    vtype_t t = infer_type(ctx, (pm_node_t *)in->statements);
+                    if (i == 0) result = t;
+                    else if (result.kind != t.kind) {
+                        if (vt_is_numeric(result) && vt_is_numeric(t))
+                            result = vt_prim(SPINEL_TYPE_FLOAT);
+                        else if (vt_is_poly_eligible(result) && vt_is_poly_eligible(t))
+                            result = vt_prim(SPINEL_TYPE_POLY);
+                        else
+                            result = vt_prim(SPINEL_TYPE_VALUE);
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
     case PM_STATEMENTS_NODE: {
         pm_statements_node_t *s = (pm_statements_node_t *)node;
         if (s->body.size == 0) return vt_prim(SPINEL_TYPE_NIL);
@@ -1724,6 +1749,19 @@ static void infer_pass(codegen_ctx_t *ctx, pm_node_t *node) {
             if (PM_NODE_TYPE(cn) == PM_WHEN_NODE) {
                 pm_when_node_t *w = (pm_when_node_t *)cn;
                 if (w->statements) infer_pass(ctx, (pm_node_t *)w->statements);
+            }
+        }
+        if (n->else_clause) infer_pass(ctx, (pm_node_t *)n->else_clause);
+        break;
+    }
+    case PM_CASE_MATCH_NODE: {
+        pm_case_match_node_t *n = (pm_case_match_node_t *)node;
+        if (n->predicate) infer_pass(ctx, n->predicate);
+        for (size_t i = 0; i < n->conditions.size; i++) {
+            pm_node_t *cn = n->conditions.nodes[i];
+            if (PM_NODE_TYPE(cn) == PM_IN_NODE) {
+                pm_in_node_t *in = (pm_in_node_t *)cn;
+                if (in->statements) infer_pass(ctx, (pm_node_t *)in->statements);
             }
         }
         if (n->else_clause) infer_pass(ctx, (pm_node_t *)n->else_clause);
@@ -2953,33 +2991,36 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
 
     case PM_INTERPOLATED_STRING_NODE: {
         pm_interpolated_string_node_t *n = (pm_interpolated_string_node_t *)node;
+        /* AOT path: build string using sp_str_concat / sp_int_to_s / sp_poly_to_s */
         int id = ctx->temp_counter++;
-        emit(ctx, "mrb_value _is%d; {\n", id);
-        ctx->indent++;
-        emit(ctx, "_is%d = mrb_str_new_cstr(mrb, \"\");\n", id);
+        emit(ctx, "const char *_is%d = \"\";\n", id);
         for (size_t i = 0; i < n->parts.size; i++) {
             pm_node_t *part = n->parts.nodes[i];
             if (PM_NODE_TYPE(part) == PM_STRING_NODE) {
                 char *s = codegen_expr(ctx, part);
-                emit(ctx, "mrb_str_cat_cstr(mrb, _is%d, %s);\n", id, s);
+                emit(ctx, "_is%d = sp_str_concat(_is%d, %s);\n", id, id, s);
                 free(s);
             } else if (PM_NODE_TYPE(part) == PM_EMBEDDED_STATEMENTS_NODE) {
                 pm_embedded_statements_node_t *e = (pm_embedded_statements_node_t *)part;
                 if (e->statements && e->statements->body.size > 0) {
                     char *ie = codegen_expr(ctx, e->statements->body.nodes[0]);
                     vtype_t it = infer_type(ctx, e->statements->body.nodes[0]);
-                    int tmp = ctx->temp_counter++;
                     if (it.kind == SPINEL_TYPE_INTEGER)
-                        emit(ctx, "mrb_value _t%d = mrb_funcall(mrb, mrb_fixnum_value(%s), \"to_s\", 0);\n", tmp, ie);
+                        emit(ctx, "_is%d = sp_str_concat(_is%d, sp_int_to_s(%s));\n", id, id, ie);
+                    else if (it.kind == SPINEL_TYPE_FLOAT)
+                        emit(ctx, "_is%d = sp_str_concat(_is%d, sp_float_to_s(%s));\n", id, id, ie);
+                    else if (it.kind == SPINEL_TYPE_POLY)
+                        emit(ctx, "_is%d = sp_str_concat(_is%d, sp_poly_to_s(%s));\n", id, id, ie);
+                    else if (it.kind == SPINEL_TYPE_BOOLEAN)
+                        emit(ctx, "_is%d = sp_str_concat(_is%d, %s ? \"true\" : \"false\");\n", id, id, ie);
+                    else if (it.kind == SPINEL_TYPE_NIL)
+                        emit(ctx, "_is%d = sp_str_concat(_is%d, \"\");\n", id, id);
                     else
-                        emit(ctx, "mrb_value _t%d = mrb_funcall(mrb, %s, \"to_s\", 0);\n", tmp, ie);
-                    emit(ctx, "mrb_str_cat_str(mrb, _is%d, _t%d);\n", id, tmp);
+                        emit(ctx, "_is%d = sp_str_concat(_is%d, %s);\n", id, id, ie);
                     free(ie);
                 }
             }
         }
-        ctx->indent--;
-        emit(ctx, "}\n");
         return sfmt("_is%d", id);
     }
 
@@ -5228,6 +5269,71 @@ static char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
         return sfmt("_cres_%d", tmp);
     }
 
+    case PM_CASE_MATCH_NODE: {
+        /* case/in as expression — emit if/else chain with pattern matching */
+        pm_case_match_node_t *n = (pm_case_match_node_t *)node;
+        vtype_t rt = infer_type(ctx, node);
+        char *ct = vt_ctype(ctx, rt, false);
+        int tmp = ctx->temp_counter++;
+        int cid = ctx->temp_counter++;
+        ctx->needs_poly = true;
+
+        if (n->predicate) {
+            char *pred = codegen_expr(ctx, n->predicate);
+            vtype_t pt = infer_type(ctx, n->predicate);
+            if (pt.kind != SPINEL_TYPE_POLY) {
+                char *boxed = poly_box_expr_vt(ctx, pt, pred);
+                emit(ctx, "sp_RbValue _cmpred_%d = %s;\n", cid, boxed);
+                free(boxed);
+            } else {
+                emit(ctx, "sp_RbValue _cmpred_%d = %s;\n", cid, pred);
+            }
+            free(pred);
+        }
+        if (rt.kind == SPINEL_TYPE_STRING)
+            emit(ctx, "%s _cres_%d = \"\";\n", ct, tmp);
+        else
+            emit(ctx, "%s _cres_%d = 0;\n", ct, tmp);
+
+        for (size_t i = 0; i < n->conditions.size; i++) {
+            pm_node_t *cn = n->conditions.nodes[i];
+            if (PM_NODE_TYPE(cn) != PM_IN_NODE) continue;
+            pm_in_node_t *in = (pm_in_node_t *)cn;
+            emit(ctx, "%sif (", i == 0 ? "" : "} else ");
+            codegen_pattern_cond(ctx, in->pattern, cid);
+            emit_raw(ctx, ") {\n");
+            ctx->indent++;
+            if (in->statements) {
+                pm_statements_node_t *ws = (pm_statements_node_t *)in->statements;
+                for (size_t si = 0; si + 1 < ws->body.size; si++)
+                    codegen_stmt(ctx, ws->body.nodes[si]);
+                if (ws->body.size > 0) {
+                    char *val = codegen_expr(ctx, ws->body.nodes[ws->body.size - 1]);
+                    emit(ctx, "_cres_%d = %s;\n", tmp, val);
+                    free(val);
+                }
+            }
+            ctx->indent--;
+        }
+        if (n->else_clause) {
+            emit(ctx, "} else {\n");
+            ctx->indent++;
+            pm_else_node_t *el = (pm_else_node_t *)n->else_clause;
+            if (el->statements && el->statements->body.size > 0) {
+                pm_statements_node_t *es = el->statements;
+                for (size_t si = 0; si + 1 < es->body.size; si++)
+                    codegen_stmt(ctx, es->body.nodes[si]);
+                char *val = codegen_expr(ctx, es->body.nodes[es->body.size - 1]);
+                emit(ctx, "_cres_%d = %s;\n", tmp, val);
+                free(val);
+            }
+            ctx->indent--;
+        }
+        if (n->conditions.size > 0) emit(ctx, "}\n");
+        free(ct);
+        return sfmt("_cres_%d", tmp);
+    }
+
     case PM_LAMBDA_NODE: {
         pm_lambda_node_t *lam = (pm_lambda_node_t *)node;
         return codegen_lambda(ctx, lam);
@@ -5401,6 +5507,70 @@ static bool try_print_chr(codegen_ctx_t *ctx, pm_call_node_t *call) {
     emit(ctx, "putchar((int)%s);\n", ie);
     free(ie);
     return true;
+}
+
+/* Emit a pattern matching condition for case/in.
+ * Writes the C condition expression (without surrounding parens) to ctx->out.
+ * _cmpred_<case_id> is the sp_RbValue predicate variable. */
+static void codegen_pattern_cond(codegen_ctx_t *ctx, pm_node_t *pattern, int case_id) {
+    switch (PM_NODE_TYPE(pattern)) {
+    case PM_CONSTANT_READ_NODE: {
+        /* in Integer / in String / in Float */
+        pm_constant_read_node_t *cr = (pm_constant_read_node_t *)pattern;
+        if (ceq(ctx, cr->name, "Integer"))
+            emit_raw(ctx, "_cmpred_%d.tag == SP_T_INT", case_id);
+        else if (ceq(ctx, cr->name, "String"))
+            emit_raw(ctx, "_cmpred_%d.tag == SP_T_STRING", case_id);
+        else if (ceq(ctx, cr->name, "Float"))
+            emit_raw(ctx, "_cmpred_%d.tag == SP_T_FLOAT", case_id);
+        else
+            emit_raw(ctx, "0 /* unsupported pattern */");
+        break;
+    }
+    case PM_INTEGER_NODE: {
+        /* in 0, in 1, etc. — value match */
+        pm_integer_node_t *n = (pm_integer_node_t *)pattern;
+        int64_t val = (int64_t)n->value.value;
+        if (n->value.negative) val = -val;
+        emit_raw(ctx, "_cmpred_%d.tag == SP_T_INT && _cmpred_%d.i == %lldLL", case_id, case_id, (long long)val);
+        break;
+    }
+    case PM_FLOAT_NODE: {
+        pm_float_node_t *n = (pm_float_node_t *)pattern;
+        emit_raw(ctx, "_cmpred_%d.tag == SP_T_FLOAT && _cmpred_%d.f == %.17g", case_id, case_id, n->value);
+        break;
+    }
+    case PM_STRING_NODE: {
+        pm_string_node_t *sn = (pm_string_node_t *)pattern;
+        const uint8_t *src = pm_string_source(&sn->unescaped);
+        size_t len = pm_string_length(&sn->unescaped);
+        emit_raw(ctx, "_cmpred_%d.tag == SP_T_STRING && strcmp(_cmpred_%d.s, \"%.*s\") == 0",
+                 case_id, case_id, (int)len, src);
+        break;
+    }
+    case PM_NIL_NODE:
+        emit_raw(ctx, "_cmpred_%d.tag == SP_T_NIL", case_id);
+        break;
+    case PM_TRUE_NODE:
+        emit_raw(ctx, "_cmpred_%d.tag == SP_T_BOOL && _cmpred_%d.i", case_id, case_id);
+        break;
+    case PM_FALSE_NODE:
+        emit_raw(ctx, "_cmpred_%d.tag == SP_T_BOOL && !_cmpred_%d.i", case_id, case_id);
+        break;
+    case PM_ALTERNATION_PATTERN_NODE: {
+        /* in true | false → OR of sub-patterns */
+        pm_alternation_pattern_node_t *alt = (pm_alternation_pattern_node_t *)pattern;
+        emit_raw(ctx, "(");
+        codegen_pattern_cond(ctx, alt->left, case_id);
+        emit_raw(ctx, ") || (");
+        codegen_pattern_cond(ctx, alt->right, case_id);
+        emit_raw(ctx, ")");
+        break;
+    }
+    default:
+        emit_raw(ctx, "0 /* unsupported pattern type %d */", PM_NODE_TYPE(pattern));
+        break;
+    }
 }
 
 static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
@@ -5640,6 +5810,50 @@ static void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
             emit_raw(ctx, ") {\n");
             ctx->indent++;
             if (when->statements) codegen_stmts(ctx, (pm_node_t *)when->statements);
+            ctx->indent--;
+        }
+
+        if (n->else_clause) {
+            emit(ctx, "} else {\n");
+            ctx->indent++;
+            pm_else_node_t *el = (pm_else_node_t *)n->else_clause;
+            if (el->statements) codegen_stmts(ctx, (pm_node_t *)el->statements);
+            ctx->indent--;
+        }
+        if (n->conditions.size > 0)
+            emit(ctx, "}\n");
+        break;
+    }
+
+    case PM_CASE_MATCH_NODE: {
+        pm_case_match_node_t *n = (pm_case_match_node_t *)node;
+        char *pred = n->predicate ? codegen_expr(ctx, n->predicate) : NULL;
+        int case_id = ctx->temp_counter++;
+        ctx->needs_poly = true;
+
+        if (pred) {
+            vtype_t pt = infer_type(ctx, n->predicate);
+            if (pt.kind != SPINEL_TYPE_POLY) {
+                /* Box predicate to sp_RbValue for pattern matching */
+                char *boxed = poly_box_expr_vt(ctx, pt, pred);
+                emit(ctx, "sp_RbValue _cmpred_%d = %s;\n", case_id, boxed);
+                free(boxed);
+            } else {
+                emit(ctx, "sp_RbValue _cmpred_%d = %s;\n", case_id, pred);
+            }
+            free(pred);
+        }
+
+        for (size_t i = 0; i < n->conditions.size; i++) {
+            pm_node_t *cn = n->conditions.nodes[i];
+            if (PM_NODE_TYPE(cn) != PM_IN_NODE) continue;
+            pm_in_node_t *in = (pm_in_node_t *)cn;
+
+            emit(ctx, "%sif (", i == 0 ? "" : "} else ");
+            codegen_pattern_cond(ctx, in->pattern, case_id);
+            emit_raw(ctx, ") {\n");
+            ctx->indent++;
+            if (in->statements) codegen_stmts(ctx, (pm_node_t *)in->statements);
             ctx->indent--;
         }
 
@@ -7543,6 +7757,19 @@ static void emit_header(codegen_ctx_t *ctx) {
     emit_raw(ctx, "    snprintf(r, 32, \"%%g\", f);\n");
     emit_raw(ctx, "    if (!strchr(r, '.') && !strchr(r, 'e') && !strchr(r, 'E')) strcat(r, \".0\");\n");
     emit_raw(ctx, "    return r;\n}\n\n");
+
+    /* ---- Polymorphic to_s (after sp_int_to_s/sp_float_to_s) ---- */
+    if (ctx->needs_poly) {
+        emit_raw(ctx, "static const char *sp_poly_to_s(sp_RbValue v) {\n");
+        emit_raw(ctx, "    switch (v.tag) {\n");
+        emit_raw(ctx, "        case SP_T_INT: return sp_int_to_s(v.i);\n");
+        emit_raw(ctx, "        case SP_T_FLOAT: return sp_float_to_s(v.f);\n");
+        emit_raw(ctx, "        case SP_T_STRING: return v.s;\n");
+        emit_raw(ctx, "        case SP_T_BOOL: return v.i ? \"true\" : \"false\";\n");
+        emit_raw(ctx, "        case SP_T_NIL: return \"\";\n");
+        emit_raw(ctx, "        default: return \"(object)\";\n");
+        emit_raw(ctx, "    }\n}\n\n");
+    }
 
     /* ---- Regexp runtime (only when needed) ---- */
     if (ctx->needs_regexp) {
