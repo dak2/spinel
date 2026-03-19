@@ -379,13 +379,68 @@ sp_RbValue sp_dispatch_puts(sp_RbValue v) {
 - ✅ bimorphicダックタイピング (2クラス)
 - ✅ nilable変数
 
-### 次の3ステップ
+### 完了した3ステップ
+- ✅ 異種Hash (sp_RbHash)
+- ✅ POLY算術 (sp_poly_add/sub/mul/div/gt/lt/eq)
+- ✅ Megamorphic dispatch (3型以上 → dispatch関数)
 
-| # | 内容 | 設計 |
-|---|------|------|
-| 1 | **異種Hash** `{a: 1, b: "str"}` | sp_RbHashでキー/値をsp_RbValueで保持 |
-| 2 | **POLY算術** (+, -, *, / on sp_RbValue) | タグcheckでInt/Float分岐、String連結対応 |
-| 3 | **Megamorphic dispatch** (3型以上) | メソッド名ごとにdispatch関数を自動生成 |
+---
+
+## sp_String設計
+
+### 方針: 段階的導入
+
+MONO文字列は`const char *`のまま。POLY/GC必要な場面のみsp_Stringを使用。
+
+```
+MONO文字列 (型確定)    → const char * (現行通り、変更なし)
+POLY/GC文字列          → sp_String * (新規、GC管理)
+リテラル "hello"       → const char * (変換は必要時のみ)
+```
+
+### sp_String構造体
+
+```c
+typedef struct {
+    char *data;       // ヒープ割り当てバッファ (NUL終端)
+    int64_t len;      // バイト長
+    int64_t cap;      // バッファ容量
+} sp_String;          // ポインタ型 (GCヒープ上)
+```
+
+- エンコーディング: UTF-8固定 (フィールド不要)
+- COW: なし (初期段階)
+- GC: sp_gc_alloc + ファイナライザでdata解放
+
+### 操作
+
+```c
+sp_String *sp_String_new(const char *s);        // const char * → sp_String
+const char *sp_String_cstr(sp_String *s);       // sp_String → const char * (読み出し)
+sp_String *sp_String_concat(sp_String *a, sp_String *b);
+sp_String *sp_String_from_cstr(const char *s);  // コピー作成
+void sp_String_append(sp_String *s, const char *t);  // ミュータブル追加
+int64_t sp_String_length(sp_String *s);
+```
+
+### MONO↔sp_String境界
+
+```c
+// const char * → sp_String (MONO→POLY境界で変換)
+sp_String *sp_String_from_cstr("hello");
+
+// sp_String → const char * (puts等のstdio境界で変換)
+fputs(sp_String_cstr(s), stdout);
+```
+
+### 実装ステップ
+
+| # | 内容 |
+|---|------|
+| 1 | sp_String構造体 + new/cstr/concat/length + GC統合 |
+| 2 | SPINEL_TYPE_MUTABLE_STRING + 型推論 (<<, replace等で昇格) |
+| 3 | String#<< のミュータブル実装 (現在は再代入で代用) |
+| 4 | 既存メソッドのsp_String対応版 (upcase, downcase等) |
 
 ---
 
