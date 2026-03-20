@@ -207,6 +207,12 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
             pm_constant_read_node_t *p = (pm_constant_read_node_t *)cp->parent;
             char *mod_name = cstr(ctx, p->name);
             char *child_name = cstr(ctx, cp->name);
+            /* Float::INFINITY, Float::NAN */
+            if (strcmp(mod_name, "Float") == 0 &&
+                (strcmp(child_name, "INFINITY") == 0 || strcmp(child_name, "NAN") == 0)) {
+                free(mod_name); free(child_name);
+                return vt_prim(SPINEL_TYPE_FLOAT);
+            }
             module_info_t *mod = find_module(ctx, mod_name);
             if (mod) {
                 for (int i = 0; i < mod->const_count; i++) {
@@ -422,7 +428,10 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "reduce") == 0 || strcmp(method, "inject") == 0 ||
                     strcmp(method, "min") == 0 || strcmp(method, "max") == 0 ||
                     strcmp(method, "sum") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
-                if (strcmp(method, "sort") == 0 || strcmp(method, "uniq") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
+                if (strcmp(method, "sort") == 0 || strcmp(method, "uniq") == 0 ||
+                    strcmp(method, "compact") == 0 || strcmp(method, "flatten") == 0 ||
+                    strcmp(method, "reverse") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
+                if (strcmp(method, "unshift") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "include?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
                 if (strcmp(method, "each") == 0 || strcmp(method, "each_with_index") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "join") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
@@ -444,10 +453,11 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "[]") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "[]=") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "length") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
-                if (strcmp(method, "has_key?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
+                if (strcmp(method, "has_key?") == 0 || strcmp(method, "key?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
                 if (strcmp(method, "delete") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "each") == 0) { free(method); return vt_prim(SPINEL_TYPE_HASH); }
                 if (strcmp(method, "keys") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
+                if (strcmp(method, "values") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
             }
             /* sp_RbHash methods (heterogeneous hash) */
             if (recv_t.kind == SPINEL_TYPE_RB_HASH) {
@@ -455,6 +465,7 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "[]=") == 0) { free(method); return vt_prim(SPINEL_TYPE_POLY); }
                 if (strcmp(method, "length") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "each") == 0) { free(method); return vt_prim(SPINEL_TYPE_RB_HASH); }
+                if (strcmp(method, "has_key?") == 0 || strcmp(method, "key?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
             }
             /* String methods */
             if (recv_t.kind == SPINEL_TYPE_STRING) {

@@ -453,6 +453,19 @@ void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
         if (is_require_relative(ctx, node))
             break;
 
+        /* private/protected/public — access modifiers are no-ops in AOT */
+        {
+            char *_mname = cstr(ctx, call->name);
+            if (!call->receiver &&
+                (strcmp(_mname, "private") == 0 ||
+                 strcmp(_mname, "protected") == 0 ||
+                 strcmp(_mname, "public") == 0)) {
+                free(_mname);
+                break;
+            }
+            free(_mname);
+        }
+
         /* print int.chr → putchar */
         if (!call->receiver && try_print_chr(ctx, call))
             break;
@@ -476,14 +489,34 @@ void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
             break;
         }
 
-        /* Kernel#exit */
+        /* Kernel#exit — also handle exit(true)→0, exit(false)→1 */
         if (!call->receiver && strcmp(method, "exit") == 0) {
             if (call->arguments && call->arguments->arguments.size > 0) {
-                char *code = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
-                emit(ctx, "exit((int)%s);\n", code);
-                free(code);
+                pm_node_t *arg0 = call->arguments->arguments.nodes[0];
+                if (PM_NODE_TYPE(arg0) == PM_TRUE_NODE) {
+                    emit(ctx, "exit(0);\n");
+                } else if (PM_NODE_TYPE(arg0) == PM_FALSE_NODE) {
+                    emit(ctx, "exit(1);\n");
+                } else {
+                    char *code = codegen_expr(ctx, arg0);
+                    emit(ctx, "exit((int)%s);\n", code);
+                    free(code);
+                }
             } else {
                 emit(ctx, "exit(0);\n");
+            }
+            free(method);
+            break;
+        }
+
+        /* Kernel#abort */
+        if (!call->receiver && strcmp(method, "abort") == 0) {
+            if (call->arguments && call->arguments->arguments.size > 0) {
+                char *msg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                emit(ctx, "fprintf(stderr, \"%%s\\n\", %s); exit(1);\n", msg);
+                free(msg);
+            } else {
+                emit(ctx, "exit(1);\n");
             }
             free(method);
             break;

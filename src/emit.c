@@ -958,6 +958,15 @@ void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "}\n\n");
         emit_raw(ctx, "static mrb_int sp_RbHash_length(sp_RbHash *h) {\n");
         emit_raw(ctx, "    return h->size;\n}\n\n");
+
+        emit_raw(ctx, "static mrb_bool sp_RbHash_has_key(sp_RbHash *h, const char *key) {\n");
+        emit_raw(ctx, "    unsigned idx = sp_rb_hash_str(key) %% h->cap;\n");
+        emit_raw(ctx, "    sp_RbHashEntry *e = h->buckets[idx];\n");
+        emit_raw(ctx, "    while (e) {\n");
+        emit_raw(ctx, "        if (strcmp(e->key, key) == 0) return TRUE;\n");
+        emit_raw(ctx, "        e = e->next;\n");
+        emit_raw(ctx, "    }\n");
+        emit_raw(ctx, "    return FALSE;\n}\n\n");
     }
 
     /* ---- String helpers ---- */
@@ -1699,6 +1708,14 @@ void emit_header(codegen_ctx_t *ctx) {
     emit_raw(ctx, "    }\n");
     emit_raw(ctx, "    a->data[end] = val; a->len++;\n}\n\n");
 
+    emit_raw(ctx, "static mrb_int sp_IntArray_unshift(sp_IntArray *a, mrb_int val) {\n");
+    emit_raw(ctx, "    if (a->start > 0) { a->data[--a->start] = val; a->len++; return val; }\n");
+    emit_raw(ctx, "    mrb_int end = a->start + a->len;\n");
+    emit_raw(ctx, "    if (end >= a->cap) { a->cap = a->cap * 2 + 1; a->data = (mrb_int *)realloc(a->data, sizeof(mrb_int) * a->cap); }\n");
+    emit_raw(ctx, "    for (mrb_int i = end; i > a->start; i--) a->data[i] = a->data[i-1];\n");
+    emit_raw(ctx, "    a->data[a->start] = val; a->len++;\n");
+    emit_raw(ctx, "    return val;\n}\n\n");
+
     emit_raw(ctx, "static mrb_int sp_IntArray_shift(sp_IntArray *a) {\n");
     emit_raw(ctx, "    mrb_int v = a->data[a->start++]; a->len--; return v;\n}\n\n");
 
@@ -1959,6 +1976,13 @@ void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    return 0;\n");
         emit_raw(ctx, "}\n\n");
+
+        /* StrIntHash: values → sp_IntArray, keys → sp_StrArray */
+        emit_raw(ctx, "static sp_IntArray *sp_StrIntHash_values(sp_StrIntHash *h) {\n");
+        emit_raw(ctx, "    sp_IntArray *a = sp_IntArray_new();\n");
+        emit_raw(ctx, "    sp_HashEntry *e = h->first;\n");
+        emit_raw(ctx, "    while (e) { sp_IntArray_push(a, e->value); e = e->order_next; }\n");
+        emit_raw(ctx, "    return a;\n}\n\n");
     }
 
     /* Lambda/closure runtime (sp_Val) — emitted only when lambdas are used */

@@ -186,6 +186,10 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             free(name);
             return xstrdup("sp_argv");
         }
+        /* STDERR → stderr, STDIN → stdin, STDOUT → stdout */
+        if (strcmp(name, "STDERR") == 0) { free(name); return xstrdup("stderr"); }
+        if (strcmp(name, "STDIN") == 0) { free(name); return xstrdup("stdin"); }
+        if (strcmp(name, "STDOUT") == 0) { free(name); return xstrdup("stdout"); }
         /* Check if it's a class name used for ::method */
         if (find_class(ctx, name) || find_module(ctx, name)) {
             return name;
@@ -1016,6 +1020,27 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     free(cls_name); free(method);
                     return xstrdup("sp_IntArray_new()");
                 }
+                if (argc == 2) {
+                    /* Array.new(size, default_val) */
+                    char *sz = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    char *dv = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "sp_IntArray *_anew_%d = sp_IntArray_new();\n", tmp);
+                    emit(ctx, "for (mrb_int _ai_%d = 0; _ai_%d < %s; _ai_%d++) sp_IntArray_push(_anew_%d, %s);\n",
+                         tmp, tmp, sz, tmp, tmp, dv);
+                    free(sz); free(dv); free(cls_name); free(method);
+                    return sfmt("_anew_%d", tmp);
+                }
+                if (argc == 1) {
+                    /* Array.new(size) — zero-filled */
+                    char *sz = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "sp_IntArray *_anew_%d = sp_IntArray_new();\n", tmp);
+                    emit(ctx, "for (mrb_int _ai_%d = 0; _ai_%d < %s; _ai_%d++) sp_IntArray_push(_anew_%d, 0);\n",
+                         tmp, tmp, sz, tmp, tmp);
+                    free(sz); free(cls_name); free(method);
+                    return sfmt("_anew_%d", tmp);
+                }
                 /* Fixed-size C array (inside class) or with size arg — skip */
                 free(cls_name); free(method);
                 return xstrdup("/* array_init */");
@@ -1210,6 +1235,23 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     r = sfmt("sp_IntArray_length(%s)", recv);
                 else if (strcmp(method, "reverse!") == 0)
                     r = sfmt("sp_IntArray_reverse_bang(%s)", recv);
+                else if (strcmp(method, "reverse") == 0) {
+                    int tmp = ctx->temp_counter++;
+                    emit(ctx, "sp_IntArray *_rev_%d = sp_IntArray_new();\n", tmp);
+                    emit(ctx, "for (mrb_int _ri_%d = sp_IntArray_length(%s) - 1; _ri_%d >= 0; _ri_%d--)\n", tmp, recv, tmp, tmp);
+                    emit(ctx, "  sp_IntArray_push(_rev_%d, sp_IntArray_get(%s, _ri_%d));\n", tmp, recv, tmp);
+                    r = sfmt("_rev_%d", tmp);
+                }
+                else if (strcmp(method, "compact") == 0)
+                    r = sfmt("sp_IntArray_dup(%s)", recv);
+                else if (strcmp(method, "flatten") == 0)
+                    r = sfmt("sp_IntArray_dup(%s)", recv);
+                else if (strcmp(method, "unshift") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_IntArray_unshift(%s, %s)", recv, arg);
+                    free(arg);
+                }
                 else if (strcmp(method, "sort") == 0)
                     r = sfmt("sp_IntArray_sort(%s)", recv);
                 else if (strcmp(method, "sort!") == 0)
@@ -1742,10 +1784,19 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     r = sfmt("sp_StrIntHash_delete(%s, %s)", recv, key);
                     free(key);
                 }
+                else if (strcmp(method, "key?") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_StrIntHash_has_key(%s, %s)", recv, key);
+                    free(key);
+                }
                 else if (strcmp(method, "keys") == 0) {
                     /* h.keys returns a temporary — but typically used as h.keys.length
                      * which chains to sp_IntArray_length. Handle keys as expression. */
                     r = sfmt("sp_StrIntHash_keys(%s)", recv);
+                }
+                else if (strcmp(method, "values") == 0) {
+                    r = sfmt("sp_StrIntHash_values(%s)", recv);
                 }
                 if (r) {
                     free(recv); free(method);
@@ -1775,6 +1826,18 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                 }
                 else if (strcmp(method, "length") == 0 || strcmp(method, "size") == 0)
                     r = sfmt("sp_RbHash_length(%s)", recv);
+                else if (strcmp(method, "has_key?") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_RbHash_has_key(%s, %s)", recv, key);
+                    free(key);
+                }
+                else if (strcmp(method, "key?") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_RbHash_has_key(%s, %s)", recv, key);
+                    free(key);
+                }
                 if (r) {
                     free(recv); free(method);
                     return r;
@@ -2940,6 +3003,20 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             return xstrdup("\"main\"");
         }
 
+        /* __dir__ → directory of the source file */
+        if (!call->receiver && strcmp(method, "__dir__") == 0) {
+            free(method);
+            const char *path = ctx->source_path ? ctx->source_path : ".";
+            /* Extract directory part at compile time */
+            char dir[512];
+            strncpy(dir, path, sizeof(dir) - 1);
+            dir[sizeof(dir) - 1] = '\0';
+            char *slash = strrchr(dir, '/');
+            if (slash) *slash = '\0';
+            else strcpy(dir, ".");
+            return sfmt("\"%s\"", dir);
+        }
+
         /* method(:name) → sp_Proc_new(sp_<name>, NULL) */
         if (!call->receiver && strcmp(method, "method") == 0 &&
             call->arguments && call->arguments->arguments.size == 1 &&
@@ -3432,6 +3509,17 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             pm_constant_read_node_t *p = (pm_constant_read_node_t *)n->parent;
             char *mod_name = cstr(ctx, p->name);
             char *child_name = cstr(ctx, n->name);
+            /* Float::INFINITY and Float::NAN */
+            if (strcmp(mod_name, "Float") == 0) {
+                if (strcmp(child_name, "INFINITY") == 0) {
+                    free(mod_name); free(child_name);
+                    return xstrdup("(1.0/0.0)");
+                }
+                if (strcmp(child_name, "NAN") == 0) {
+                    free(mod_name); free(child_name);
+                    return xstrdup("(0.0/0.0)");
+                }
+            }
             /* For constants like BNUM, BNUMF */
             char *r = sfmt("sp_%s_%s", mod_name, child_name);
             free(mod_name); free(child_name);
