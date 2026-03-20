@@ -225,15 +225,69 @@ Regexp使用時のみ libonig をリンク。
 - ✅ **NaN-boxing** (8バイト favor pointer, JSC方式)
 - ✅ **ソースコード分割**: codegen.c (12200行) → 5ファイル (最大3700行)
 
-### 未実装の主要機能
-- JSON.parse / JSON.generate (cJSONライブラリ連携)
-- Thread.new / Mutex (pthreads連携)
-- IO.console / winsize (ioctl)
-- method_missing / respond_to_missing?
-- open classes / monkey patching
-- eval / binding
-- Fiber
-- load / gem require
+### 巨大ゴール: lrama コンパイル
+
+71ファイル / 14,133行のRubyコード (LALR(1)パーサジェネレータ) をコンパイル対象とする。
+ソース: `/home/matz/work/mruby/tools/lrama/`
+
+#### lrama分析で判明した不足機能 (優先度順)
+
+**Phase A: 言語基盤 (依存なしで実装可、多くのファイルに影響)**
+
+| # | 機能 | lrama使用数 | 難易度 |
+|---|------|------------|--------|
+| A1 | `private` キーワード (メソッド可視性、無視でOK) | 22ファイル | 低 |
+| A2 | `case` without expression (bare case) | 8ファイル | 低 |
+| A3 | `Array.new(n, val)` コンストラクタ | 7箇所 | 低 |
+| A4 | `Array#compact` (nil除去) | 6箇所 | 低 |
+| A5 | `Array#flatten` | 6箇所 | 低 |
+| A6 | `Array#unshift` | 多数 | 低 |
+| A7 | `Array#reverse` | 2箇所 | 低 |
+| A8 | `Hash#values` / `Hash#keys` / `Hash#key?` | 多数 | 低 |
+| A9 | `Hash#merge` (ブロックなし) | 多数 | 中 |
+| A10 | `Hash#transform_values` | 6箇所 | 中 |
+| A11 | `.to_h` (配列→Hash変換) | 6箇所 | 中 |
+| A12 | `alias :new_name :old_name` | 5ファイル | 低 |
+| A13 | `%w[...]` / `%i[...]` リテラル | 3箇所 | 低 |
+| A14 | `Float::INFINITY` | 2箇所 | 低 |
+| A15 | `__dir__` | 3箇所 | 低 |
+| A16 | `abort` / `exit(n)` / `STDERR` / `STDIN` | 各数箇所 | 低 |
+| A17 | `group_by` | 4箇所 | 中 |
+| A18 | `.zip` | 2箇所 | 中 |
+| A19 | `.dup` (オブジェクト複製) | 4箇所 | 中 |
+| A20 | `Hash.new(default)` | 2箇所 | 中 |
+
+**Phase B: クラスシステム拡張**
+
+| # | 機能 | lrama使用数 | 難易度 |
+|---|------|------------|--------|
+| B1 | `class X < Struct.new(...)` + メソッド追加 | 10クラス | 中 |
+| B2 | `attr_writer` | 2箇所 | 低 |
+| B3 | `Comparable` mixin (include + <=>) | 1箇所 | 低 |
+| B4 | `extend Forwardable` + `def_delegators` | 5クラス | 高 |
+
+**Phase C: 外部ライブラリ依存**
+
+| # | 機能 | 難易度 | 備考 |
+|---|------|--------|------|
+| C1 | `StringScanner` | 高 | lexer.rb の根幹、自前実装必要 |
+| C2 | `ERB` テンプレート | 高 | output.rb の根幹 |
+| C3 | `OptionParser` | 高 | CLI解析、書き直し可能 |
+| C4 | `Set` | 中 | sp_IntSet で代替可能 |
+
+**Phase D: 動的機能 (コンパイル困難)**
+
+| # | 機能 | 備考 |
+|---|------|------|
+| D1 | `module_eval` / `class_eval` | parser.rb (Racc生成) で使用 |
+| D2 | `__send__` (動的ディスパッチ) | parser.rb で使用 |
+| D3 | `define_method` / `respond_to_missing?` | 未使用 |
+
+#### 実装ロードマップ
+
+Phase A を先に完了させる。各ステップでコミット。
+A1-A16 は容易、A17-A20 は中程度。
+Phase B は A 完了後。Phase C は個別対応。Phase D は後回し。
 
 ---
 
