@@ -458,6 +458,7 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "each") == 0) { free(method); return vt_prim(SPINEL_TYPE_HASH); }
                 if (strcmp(method, "keys") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
                 if (strcmp(method, "values") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
+                if (strcmp(method, "merge") == 0) { free(method); return vt_prim(SPINEL_TYPE_HASH); }
             }
             /* sp_RbHash methods (heterogeneous hash) */
             if (recv_t.kind == SPINEL_TYPE_RB_HASH) {
@@ -466,6 +467,7 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "length") == 0) { free(method); return vt_prim(SPINEL_TYPE_INTEGER); }
                 if (strcmp(method, "each") == 0) { free(method); return vt_prim(SPINEL_TYPE_RB_HASH); }
                 if (strcmp(method, "has_key?") == 0 || strcmp(method, "key?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
+                if (strcmp(method, "merge") == 0) { free(method); return vt_prim(SPINEL_TYPE_RB_HASH); }
             }
             /* String methods */
             if (recv_t.kind == SPINEL_TYPE_STRING) {
@@ -508,6 +510,7 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                     strcmp(method, "reverse") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
                 if (strcmp(method, "include?") == 0) { free(method); return vt_prim(SPINEL_TYPE_BOOLEAN); }
                 if (strcmp(method, "<<") == 0) { free(method); return vt_prim(SPINEL_TYPE_SP_STRING); }
+                if (strcmp(method, "dup") == 0) { free(method); return vt_prim(SPINEL_TYPE_SP_STRING); }
                 if (strcmp(method, "replace") == 0 || strcmp(method, "clear") == 0) { free(method); return vt_prim(SPINEL_TYPE_SP_STRING); }
                 if (strcmp(method, "to_s") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
                 if (strcmp(method, "[]") == 0) { free(method); return vt_prim(SPINEL_TYPE_STRING); }
@@ -615,6 +618,10 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                     /* Array.new(N) — fixed-size C array, type depends on context */
                     free(cls_name); free(method);
                     return vt_prim(SPINEL_TYPE_VALUE);
+                }
+                if (strcmp(cls_name, "Hash") == 0) {
+                    free(cls_name); free(method);
+                    return vt_prim(SPINEL_TYPE_HASH);
                 }
                 if (find_class(ctx, cls_name)) {
                     result = vt_obj(cls_name);

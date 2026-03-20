@@ -1045,6 +1045,20 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                 free(cls_name); free(method);
                 return xstrdup("/* array_init */");
             }
+            /* Hash.new / Hash.new(default) */
+            if (strcmp(cls_name, "Hash") == 0) {
+                int argc = call->arguments ? (int)call->arguments->arguments.size : 0;
+                ctx->needs_hash = true;
+                ctx->needs_gc = true;
+                if (argc == 1) {
+                    char *dv = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    char *r = sfmt("sp_StrIntHash_new_with_default(%s)", dv);
+                    free(dv); free(cls_name); free(method);
+                    return r;
+                }
+                free(cls_name); free(method);
+                return xstrdup("sp_StrIntHash_new()");
+            }
             free(cls_name);
         }
 
@@ -1798,6 +1812,12 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                 else if (strcmp(method, "values") == 0) {
                     r = sfmt("sp_StrIntHash_values(%s)", recv);
                 }
+                else if (strcmp(method, "merge") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_StrIntHash_merge(%s, %s)", recv, arg);
+                    free(arg);
+                }
                 if (r) {
                     free(recv); free(method);
                     return r;
@@ -1837,6 +1857,12 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     char *key = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
                     r = sfmt("sp_RbHash_has_key(%s, %s)", recv, key);
                     free(key);
+                }
+                else if (strcmp(method, "merge") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_RbHash_merge(%s, %s)", recv, arg);
+                    free(arg);
                 }
                 if (r) {
                     free(recv); free(method);
@@ -2369,6 +2395,8 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     r = sfmt("(strstr(sp_String_cstr(%s), %s) != NULL)", recv, arg);
                     free(arg);
                 }
+                else if (strcmp(method, "dup") == 0)
+                    r = sfmt("sp_String_dup(%s)", recv);
                 if (r) {
                     free(recv); free(method);
                     return r;

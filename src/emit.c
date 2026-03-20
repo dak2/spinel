@@ -265,6 +265,23 @@ void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m) {
     if (strcmp(m->name, "initialize") == 0) return; /* handled by constructor */
     if (m->is_getter || m->is_setter) return; /* inlined */
 
+    /* Comparable synthetic methods: <, >, <=, >=, == delegating to <=> */
+    if (!m->body_node && m->param_count == 1 &&
+        m->return_type.kind == SPINEL_TYPE_BOOLEAN &&
+        (strcmp(m->name, "<") == 0 || strcmp(m->name, ">") == 0 ||
+         strcmp(m->name, "<=") == 0 || strcmp(m->name, ">=") == 0 ||
+         strcmp(m->name, "==") == 0)) {
+        const char *c_mname = sanitize_method(m->name);
+        const char *c_op = m->name; /* the C operator is the same */
+        const char *ptr = cls->is_value_type ? "" : "*";
+        emit_raw(ctx, "static mrb_bool sp_%s_%s(sp_%s %sself, sp_%s %slv_other) {\n",
+                 cls->name, c_mname, cls->name, ptr, cls->name, ptr);
+        emit_raw(ctx, "    return sp_%s__cmp(self, lv_other) %s 0;\n",
+                 cls->name, c_op);
+        emit_raw(ctx, "}\n\n");
+        return;
+    }
+
     /* Determine return type C string */
     char *ret_ct = vt_ctype(ctx, m->return_type, false);
     bool ret_void = (m->return_type.kind == SPINEL_TYPE_NIL);
@@ -967,6 +984,15 @@ void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "        e = e->next;\n");
         emit_raw(ctx, "    }\n");
         emit_raw(ctx, "    return FALSE;\n}\n\n");
+
+        /* RbHash: merge → new hash with entries from both */
+        emit_raw(ctx, "static sp_RbHash *sp_RbHash_merge(sp_RbHash *h1, sp_RbHash *h2) {\n");
+        emit_raw(ctx, "    sp_RbHash *r = sp_RbHash_new();\n");
+        emit_raw(ctx, "    sp_RbHashEntry *e = h1->first;\n");
+        emit_raw(ctx, "    while (e) { sp_RbHash_set(r, e->key, e->value); e = e->order_next; }\n");
+        emit_raw(ctx, "    e = h2->first;\n");
+        emit_raw(ctx, "    while (e) { sp_RbHash_set(r, e->key, e->value); e = e->order_next; }\n");
+        emit_raw(ctx, "    return r;\n}\n\n");
     }
 
     /* ---- String helpers ---- */
@@ -1216,6 +1242,7 @@ void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "    if (tlen >= (size_t)s->cap) { s->cap = tlen + 1; s->data = realloc(s->data, s->cap); }\n");
         emit_raw(ctx, "    memcpy(s->data, t, tlen + 1); s->len = tlen;\n}\n");
         emit_raw(ctx, "static void sp_String_clear(sp_String *s) { s->data[0] = '\\0'; s->len = 0; }\n");
+        emit_raw(ctx, "static sp_String *sp_String_dup(sp_String *s) { return sp_String_new(s->data); }\n");
         emit_raw(ctx, "static const char *sp_String_char_at(sp_String *s, int64_t idx) {\n");
         emit_raw(ctx, "    if (idx < 0) idx += s->len;\n");
         emit_raw(ctx, "    if (idx < 0 || idx >= s->len) return \"\";\n");
@@ -1883,6 +1910,8 @@ void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "    mrb_int cap;\n");
         emit_raw(ctx, "    sp_HashEntry *first; /* insertion-order head */\n");
         emit_raw(ctx, "    sp_HashEntry *last;  /* insertion-order tail */\n");
+        emit_raw(ctx, "    mrb_int default_value; /* Hash.new(val) default */\n");
+        emit_raw(ctx, "    mrb_bool has_default;\n");
         emit_raw(ctx, "} sp_StrIntHash;\n\n");
 
         emit_raw(ctx, "static unsigned sp_hash_str(const char *s) {\n");
@@ -1939,8 +1968,14 @@ void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "        if (strcmp(e->key, key) == 0) return e->value;\n");
         emit_raw(ctx, "        e = e->next;\n");
         emit_raw(ctx, "    }\n");
-        emit_raw(ctx, "    return 0;\n");
+        emit_raw(ctx, "    return h->has_default ? h->default_value : 0;\n");
         emit_raw(ctx, "}\n\n");
+
+        /* Hash.new(default_value) constructor */
+        emit_raw(ctx, "static sp_StrIntHash *sp_StrIntHash_new_with_default(mrb_int val) {\n");
+        emit_raw(ctx, "    sp_StrIntHash *h = sp_StrIntHash_new();\n");
+        emit_raw(ctx, "    h->default_value = val; h->has_default = TRUE;\n");
+        emit_raw(ctx, "    return h;\n}\n\n");
 
         emit_raw(ctx, "static mrb_int sp_StrIntHash_length(sp_StrIntHash *h) {\n");
         emit_raw(ctx, "    return h->size;\n}\n\n");
@@ -1983,6 +2018,15 @@ void emit_header(codegen_ctx_t *ctx) {
         emit_raw(ctx, "    sp_HashEntry *e = h->first;\n");
         emit_raw(ctx, "    while (e) { sp_IntArray_push(a, e->value); e = e->order_next; }\n");
         emit_raw(ctx, "    return a;\n}\n\n");
+
+        /* StrIntHash: merge → new hash with entries from both */
+        emit_raw(ctx, "static sp_StrIntHash *sp_StrIntHash_merge(sp_StrIntHash *h1, sp_StrIntHash *h2) {\n");
+        emit_raw(ctx, "    sp_StrIntHash *r = sp_StrIntHash_new();\n");
+        emit_raw(ctx, "    sp_HashEntry *e = h1->first;\n");
+        emit_raw(ctx, "    while (e) { sp_StrIntHash_set(r, e->key, e->value); e = e->order_next; }\n");
+        emit_raw(ctx, "    e = h2->first;\n");
+        emit_raw(ctx, "    while (e) { sp_StrIntHash_set(r, e->key, e->value); e = e->order_next; }\n");
+        emit_raw(ctx, "    return r;\n}\n\n");
     }
 
     /* Lambda/closure runtime (sp_Val) — emitted only when lambdas are used */

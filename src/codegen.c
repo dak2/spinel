@@ -1728,6 +1728,40 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         }
     }
 
+    /* Pass 1d: Comparable mixin — auto-generate <, >, <=, >=, == from <=> */
+    for (int ci = 0; ci < ctx->class_count; ci++) {
+        class_info_t *cls = &ctx->classes[ci];
+        bool has_comparable = false;
+        for (int ii = 0; ii < cls->include_count; ii++) {
+            if (strcmp(cls->includes[ii], "Comparable") == 0) {
+                has_comparable = true;
+                break;
+            }
+        }
+        if (!has_comparable) continue;
+        /* Check that <=> is defined */
+        method_info_t *cmp = find_method(cls, "<=>");
+        if (!cmp) continue;
+        /* Generate comparison methods that delegate to <=> */
+        static const char *comp_ops[] = { "<", ">", "<=", ">=", "==" };
+        for (int oi = 0; oi < 5; oi++) {
+            if (find_method(cls, comp_ops[oi])) continue; /* already defined */
+            if (cls->method_count >= MAX_METHODS) continue;
+            method_info_t *m = &cls->methods[cls->method_count++];
+            memset(m, 0, sizeof(*m));
+            snprintf(m->name, sizeof(m->name), "%s", comp_ops[oi]);
+            m->body_node = NULL; /* synthetic — handled specially in emit */
+            m->params_node = NULL;
+            m->param_count = 1;
+            snprintf(m->params[0].name, 64, "other");
+            m->params[0].type = vt_obj(cls->name);
+            m->return_type = vt_prim(SPINEL_TYPE_BOOLEAN);
+            m->is_getter = false;
+            m->is_setter = false;
+            m->is_class_method = false;
+        }
+    }
+
     /* Pass 2: Type inference for top-level code */
     infer_pass(ctx, root);
 
