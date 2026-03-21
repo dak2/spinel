@@ -283,11 +283,42 @@ Regexp使用時のみ libonig をリンク。
 | D2 | `__send__` (動的ディスパッチ) | parser.rb で使用 |
 | D3 | `define_method` / `respond_to_missing?` | 未使用 |
 
-#### 実装ロードマップ
+#### 進捗
 
-Phase A を先に完了させる。各ステップでコミット。
-A1-A16 は容易、A17-A20 は中程度。
-Phase B は A 完了後。Phase C は個別対応。Phase D は後回し。
+**Phase A: 18/20 完了** ✅ (A17 group_by 後回し)
+- A1-A16, A18-A20 全て実装済み
+- A10 transform_values, A11 .to_h, A18 zip も完了
+
+**Phase B: 3/4 完了** ✅
+- B1 class < Struct.new ✅, B2 attr_writer ✅, B3 Comparable ✅
+- B4 Forwardable → stub で回避
+
+**追加実装:**
+- `--lib=DIR` search path for `require` (stub system)
+- Module::Class.new 構文
+- nested class/module detection in modules
+- module origin_parser (multi-file AST parser tracking)
+- class/module dedup (再オープン対応)
+- PM_RETURN_NODE / PM_UNLESS_NODE as expression
+- PM_INSTANCE_VARIABLE_OR_WRITE_NODE (`@var ||=`)
+- Array#<< on IntArray → sp_IntArray_push
+- Array#map!, Array#insert
+- Kernel#warn, report_duration stub
+- type inference: OBJECT receiver method dispatch
+- type inference: ivar name → class heuristic
+- type inference: reopened class merging
+
+**現状: lrama 71ファイル → 4500行 C 生成成功、C コンパイルは 334 エラー残**
+
+#### 残課題
+
+| カテゴリ | 件数 | 対処 |
+|---------|------|------|
+| 型推論不足 (`unknown#method`) | ~400 | Struct field 型推論、メソッドチェーン推論 |
+| StringScanner stub | ~35 | stubs/strscan.rb + strscan.c 実装 |
+| OptionParser stub | ~10 | stubs/optparse.rb 実装 |
+| parser.rb (Racc/eval) | 1ファイル | **AOT不可** — 手書き代替必要 |
+| ERB (output.rb) | 1ファイル | **AOT不可** — テンプレート事前展開必要 |
 
 ---
 
