@@ -634,6 +634,17 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 }
                 free(cls_name);
             }
+            /* Module::ClassName.new(...) — extract last component */
+            if (PM_NODE_TYPE(call->receiver) == PM_CONSTANT_PATH_NODE) {
+                pm_constant_path_node_t *cp = (pm_constant_path_node_t *)call->receiver;
+                char *cls_name = cstr(ctx, cp->name);
+                if (find_class(ctx, cls_name)) {
+                    result = vt_obj(cls_name);
+                    free(cls_name); free(method);
+                    return result;
+                }
+                free(cls_name);
+            }
         }
 
         /* Module method calls: Rand::rand, Math.sqrt etc. */

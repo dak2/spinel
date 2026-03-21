@@ -729,6 +729,10 @@ void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
 /* ------------------------------------------------------------------ */
 
 void emit_module(codegen_ctx_t *ctx, module_info_t *mod) {
+    /* Swap to module's origin parser for constant codegen */
+    pm_parser_t *saved_parser = ctx->parser;
+    if (mod->origin_parser) ctx->parser = mod->origin_parser;
+
     /* Emit module constants as #define macros (avoids file-scope init issues) */
     ctx->current_module = mod;
     for (int i = 0; i < mod->const_count; i++) {
@@ -825,6 +829,8 @@ void emit_module(codegen_ctx_t *ctx, module_info_t *mod) {
         ctx->var_count = saved_var_count;
         emit_raw(ctx, "}\n\n");
     }
+
+    ctx->parser = saved_parser;
 }
 
 /* ------------------------------------------------------------------ */

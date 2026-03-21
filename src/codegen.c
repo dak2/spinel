@@ -419,6 +419,15 @@ static void analyze_ivars_from_init(codegen_ctx_t *ctx, class_info_t *cls,
 }
 
 static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
+    /* Dedup: skip if class already registered */
+    if (PM_NODE_TYPE(node->constant_path) == PM_CONSTANT_READ_NODE) {
+        pm_constant_read_node_t *cr = (pm_constant_read_node_t *)node->constant_path;
+        char *dn = cstr(ctx, cr->name);
+        if (find_class(ctx, dn)) { free(dn); return; }
+        free(dn);
+    }
+    if (ctx->class_count >= MAX_CLASSES) return;
+
     class_info_t *cls = &ctx->classes[ctx->class_count++];
     memset(cls, 0, sizeof(*cls));
     cls->class_node = (pm_node_t *)node;
@@ -692,6 +701,7 @@ static void analyze_module(codegen_ctx_t *ctx, pm_module_node_t *node) {
         snprintf(mod->name, sizeof(mod->name), "%s", mod_name);
     }
     mod->module_node = (pm_node_t *)node;
+    if (!mod->origin_parser) mod->origin_parser = ctx->parser;
 
     /* Analyze module body for methods and class ivars */
     if (!node->body) return;
@@ -786,6 +796,12 @@ static void analyze_module(codegen_ctx_t *ctx, pm_module_node_t *node) {
                 mc->type = vt_prim(SPINEL_TYPE_INTEGER);
             }
             free(cname);
+        } else if (PM_NODE_TYPE(s) == PM_CLASS_NODE) {
+            if (ctx->class_count < MAX_CLASSES)
+                analyze_class(ctx, (pm_class_node_t *)s);
+        } else if (PM_NODE_TYPE(s) == PM_MODULE_NODE) {
+            if (ctx->module_count < MAX_MODULES)
+                analyze_module(ctx, (pm_module_node_t *)s);
         }
     }
 }

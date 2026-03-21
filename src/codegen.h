@@ -112,6 +112,7 @@ typedef struct {
     module_const_t consts[MAX_IVARS]; /* module-level constants */
     int const_count;
     pm_node_t *module_node;
+    pm_parser_t *origin_parser;
 } module_info_t;
 
 /* Block callback function type (for yield support) */
@@ -144,7 +145,7 @@ typedef struct {
 } var_entry_t;
 
 #define MAX_VARS 1024
-#define MAX_CLASSES 128
+#define MAX_CLASSES 160
 #define MAX_MODULES 64
 #define MAX_FUNCS 128
 

@@ -27,7 +27,7 @@ all: spinel
 spinel: $(OBJS) $(PRISM_LIB)
 	$(CC) $(OBJS) $(PRISM_LIB) -o $@
 
-src/%.o: src/%.c $(PRISM_LIB)
+src/%.o: src/%.c src/codegen.h $(PRISM_LIB)
 	$(CC) $(CFLAGS) $(PRISM_CFLAGS) -c $< -o $@
 
 # Dependencies

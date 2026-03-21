@@ -1061,6 +1061,53 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
             }
             free(cls_name);
         }
+        /* Constructor: Module::ClassName.new(args) */
+        if (strcmp(method, "new") == 0 && call->receiver &&
+            PM_NODE_TYPE(call->receiver) == PM_CONSTANT_PATH_NODE) {
+            pm_constant_path_node_t *cp = (pm_constant_path_node_t *)call->receiver;
+            char *cls_name = cstr(ctx, cp->name);
+            class_info_t *cls = find_class(ctx, cls_name);
+            if (cls) {
+                int argc = call->arguments ? (int)call->arguments->arguments.size : 0;
+                char *args = xstrdup("");
+                /* Check for keyword_init */
+                method_info_t *init_m = NULL;
+                for (int mi = 0; mi < cls->method_count; mi++)
+                    if (strcmp(cls->methods[mi].name, "initialize") == 0) { init_m = &cls->methods[mi]; break; }
+                bool kw_init = init_m && init_m->param_count > 0 && init_m->params[0].is_keyword;
+                if (kw_init && argc == 1 &&
+                    PM_NODE_TYPE(call->arguments->arguments.nodes[0]) == PM_KEYWORD_HASH_NODE) {
+                    pm_keyword_hash_node_t *kwh = (pm_keyword_hash_node_t *)call->arguments->arguments.nodes[0];
+                    for (int pi = 0; pi < init_m->param_count; pi++) {
+                        char *val = NULL;
+                        for (int ki = 0; ki < (int)kwh->elements.size; ki++) {
+                            if (PM_NODE_TYPE(kwh->elements.nodes[ki]) != PM_ASSOC_NODE) continue;
+                            pm_assoc_node_t *assoc = (pm_assoc_node_t *)kwh->elements.nodes[ki];
+                            if (PM_NODE_TYPE(assoc->key) == PM_SYMBOL_NODE) {
+                                pm_symbol_node_t *ksym = (pm_symbol_node_t *)assoc->key;
+                                const uint8_t *ksrc = pm_string_source(&ksym->unescaped);
+                                size_t klen = pm_string_length(&ksym->unescaped);
+                                char kname[64]; snprintf(kname, sizeof(kname), "%.*s", (int)klen, ksrc);
+                                if (strcmp(kname, init_m->params[pi].name) == 0) { val = codegen_expr(ctx, assoc->value); break; }
+                            }
+                        }
+                        if (!val) val = xstrdup("0");
+                        char *na = sfmt("%s%s%s", args, pi > 0 ? ", " : "", val);
+                        free(args); free(val); args = na;
+                    }
+                } else {
+                    for (int i = 0; i < argc; i++) {
+                        char *a = codegen_expr(ctx, call->arguments->arguments.nodes[i]);
+                        char *na = sfmt("%s%s%s", args, i > 0 ? ", " : "", a);
+                        free(args); free(a); args = na;
+                    }
+                }
+                char *r = sfmt("sp_%s_new(%s)", cls_name, args);
+                free(cls_name); free(args); free(method);
+                return r;
+            }
+            free(cls_name);
+        }
 
         /* Method call on typed receiver */
         if (call->receiver) {
