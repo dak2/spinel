@@ -156,7 +156,17 @@ void codegen_stmt(codegen_ctx_t *ctx, pm_node_t *node) {
         char *cn = make_cname(name, false);
         char *op = cstr(ctx, n->binary_operator);
         char *val = codegen_expr(ctx, n->value);
-        emit(ctx, "%s %s= %s;\n", cn, op, val);
+        vtype_t vt = infer_type(ctx, (pm_node_t *)n);
+        if (strcmp(op, "+") == 0 && (vt.kind == SPINEL_TYPE_STRING || vt.kind == SPINEL_TYPE_SP_STRING)) {
+            emit(ctx, "%s = sp_str_concat(%s, %s);\n", cn, cn, val);
+        } else if (strcmp(op, "+") == 0 && vt.kind == SPINEL_TYPE_ARRAY) {
+            /* IntArray += → concat arrays (push all elements) */
+            int tmp = ctx->temp_counter++;
+            emit(ctx, "{ sp_IntArray *_src_%d = %s; for (mrb_int _ci_%d = 0; _ci_%d < sp_IntArray_length(_src_%d); _ci_%d++) sp_IntArray_push(%s, sp_IntArray_get(_src_%d, _ci_%d)); }\n",
+                 tmp, val, tmp, tmp, tmp, tmp, cn, tmp, tmp);
+        } else {
+            emit(ctx, "%s %s= %s;\n", cn, op, val);
+        }
         free(name); free(cn); free(op); free(val);
         break;
     }

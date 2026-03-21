@@ -77,7 +77,7 @@ typedef struct {
 } method_info_t;
 
 /* Class info */
-#define MAX_IVARS 32
+#define MAX_IVARS 48
 #define MAX_METHODS 96
 #define MAX_INCLUDES 16
 typedef struct {
@@ -291,6 +291,17 @@ typedef struct {
     char names[256][64];
     int count;
 } capture_list_t;
+
+/* --- C keyword escaping --- */
+static inline const char *escape_c_keyword(const char *name) {
+    /* Only escape the most problematic C keywords that might be ivar names */
+    if (name[0] == 'u' && strcmp(name, "union") == 0) return "union_";
+    if (name[0] == 's' && strcmp(name, "struct") == 0) return "struct_";
+    if (name[0] == 'e' && strcmp(name, "enum") == 0) return "enum_";
+    if (name[0] == 'd' && strcmp(name, "default") == 0) return "default_";
+    if (name[0] == 'r' && strcmp(name, "register") == 0) return "register_";
+    return name;
+}
 
 /* --- Shared utility functions (codegen.c) --- */
 char *xstrdup(const char *s);

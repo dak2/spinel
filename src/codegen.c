@@ -419,7 +419,7 @@ static void analyze_ivars_from_init(codegen_ctx_t *ctx, class_info_t *cls,
             /* Skip if already registered (e.g., from attr_accessor) */
             if (!find_ivar(cls, ivname + 1) && cls->ivar_count < MAX_IVARS) {
                 ivar_info_t *iv = &cls->ivars[cls->ivar_count++];
-                snprintf(iv->name, sizeof(iv->name), "%s", ivname + 1); /* skip @ */
+                snprintf(iv->name, sizeof(iv->name), "%s", escape_c_keyword(ivname + 1));
                 /* Type will be resolved in pass 2 */
                 iv->type = vt_prim(SPINEL_TYPE_VALUE);
             }
@@ -501,7 +501,7 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
 
                     /* Ivar */
                     ivar_info_t *iv = &cls->ivars[cls->ivar_count++];
-                    snprintf(iv->name, sizeof(iv->name), "%s", fname);
+                    snprintf(iv->name, sizeof(iv->name), "%s", escape_c_keyword(fname));
                     iv->type = keyword_init ? vt_prim(SPINEL_TYPE_VALUE) : vt_prim(SPINEL_TYPE_INTEGER);
 
                     /* Init param */
@@ -515,7 +515,7 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                     memset(getter, 0, sizeof(*getter));
                     snprintf(getter->name, sizeof(getter->name), "%s", fname);
                     getter->is_getter = true;
-                    snprintf(getter->accessor_ivar, sizeof(getter->accessor_ivar), "%s", fname);
+                    snprintf(getter->accessor_ivar, sizeof(getter->accessor_ivar), "%s", escape_c_keyword(fname));
                     getter->return_type = vt_prim(SPINEL_TYPE_INTEGER);
 
                     /* Setter */
@@ -523,7 +523,7 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                     memset(setter, 0, sizeof(*setter));
                     snprintf(setter->name, sizeof(setter->name), "%s=", fname);
                     setter->is_setter = true;
-                    snprintf(setter->accessor_ivar, sizeof(setter->accessor_ivar), "%s", fname);
+                    snprintf(setter->accessor_ivar, sizeof(setter->accessor_ivar), "%s", escape_c_keyword(fname));
                     setter->param_count = 1;
                     snprintf(setter->params[0].name, 64, "v");
                     setter->params[0].type = vt_prim(SPINEL_TYPE_INTEGER);
@@ -608,7 +608,7 @@ static void analyze_class(codegen_ctx_t *ctx, pm_class_node_t *node) {
                     /* Register ivar if not already present */
                     if (!find_ivar(cls, sym_name) && cls->ivar_count < MAX_IVARS) {
                         ivar_info_t *iv = &cls->ivars[cls->ivar_count++];
-                        snprintf(iv->name, sizeof(iv->name), "%s", sym_name);
+                        snprintf(iv->name, sizeof(iv->name), "%s", escape_c_keyword(sym_name));
                         iv->type = vt_prim(SPINEL_TYPE_VALUE);
                     }
 
@@ -797,7 +797,7 @@ static void analyze_module(codegen_ctx_t *ctx, pm_module_node_t *node) {
                 (pm_instance_variable_write_node_t *)s;
             char *ivname = cstr(ctx, iw->name);
             ivar_info_t *iv = &mod->vars[mod->var_count++];
-            snprintf(iv->name, sizeof(iv->name), "%s", ivname + 1);
+            snprintf(iv->name, sizeof(iv->name), "%s", escape_c_keyword(ivname + 1));
             iv->type = vt_prim(SPINEL_TYPE_INTEGER);
             free(ivname);
         } else if (PM_NODE_TYPE(s) == PM_CONSTANT_WRITE_NODE) {
@@ -1065,7 +1065,7 @@ void class_analysis_pass(codegen_ctx_t *ctx, pm_node_t *root) {
 
                             /* Ivar */
                             ivar_info_t *iv = &cls->ivars[cls->ivar_count++];
-                            snprintf(iv->name, sizeof(iv->name), "%s", fname);
+                            snprintf(iv->name, sizeof(iv->name), "%s", escape_c_keyword(fname));
                             iv->type = keyword_init ? vt_prim(SPINEL_TYPE_VALUE) : vt_prim(SPINEL_TYPE_INTEGER);
 
                             /* Init param */
@@ -1079,7 +1079,7 @@ void class_analysis_pass(codegen_ctx_t *ctx, pm_node_t *root) {
                             memset(getter, 0, sizeof(*getter));
                             snprintf(getter->name, sizeof(getter->name), "%s", fname);
                             getter->is_getter = true;
-                            snprintf(getter->accessor_ivar, sizeof(getter->accessor_ivar), "%s", fname);
+                            snprintf(getter->accessor_ivar, sizeof(getter->accessor_ivar), "%s", escape_c_keyword(fname));
                             getter->return_type = vt_prim(SPINEL_TYPE_INTEGER);
 
                             /* Setter */
@@ -1087,7 +1087,7 @@ void class_analysis_pass(codegen_ctx_t *ctx, pm_node_t *root) {
                             memset(setter, 0, sizeof(*setter));
                             snprintf(setter->name, sizeof(setter->name), "%s=", fname);
                             setter->is_setter = true;
-                            snprintf(setter->accessor_ivar, sizeof(setter->accessor_ivar), "%s", fname);
+                            snprintf(setter->accessor_ivar, sizeof(setter->accessor_ivar), "%s", escape_c_keyword(fname));
                             setter->param_count = 1;
                             snprintf(setter->params[0].name, 64, "v");
                             setter->params[0].type = vt_prim(SPINEL_TYPE_INTEGER);

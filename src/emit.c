@@ -16,6 +16,8 @@ void emit_struct(codegen_ctx_t *ctx, class_info_t *cls) {
     emit_raw(ctx, "struct sp_%s_s {\n", cls->name);
     for (int i = 0; i < cls->ivar_count; i++) {
         ivar_info_t *iv = &cls->ivars[i];
+        /* Escape C keywords in field names */
+        const char *field_name = escape_c_keyword(iv->name);
         /* Special: Scene.spheres is sp_Sphere *[3] */
         if (strcmp(cls->name, "Scene") == 0 && strcmp(iv->name, "spheres") == 0) {
             emit_raw(ctx, "    sp_Sphere *spheres[3];\n");
@@ -25,11 +27,11 @@ void emit_struct(codegen_ctx_t *ctx, class_info_t *cls) {
         if (iv->type.kind == SPINEL_TYPE_OBJECT) {
             class_info_t *fc = find_class(ctx, iv->type.klass);
             if (fc && !fc->is_value_type)
-                emit_raw(ctx, "    %s *%s;\n", ct, iv->name);
+                emit_raw(ctx, "    %s *%s;\n", ct, field_name);
             else
-                emit_raw(ctx, "    %s %s;\n", ct, iv->name);
+                emit_raw(ctx, "    %s %s;\n", ct, field_name);
         } else {
-            emit_raw(ctx, "    %s %s;\n", ct, iv->name);
+            emit_raw(ctx, "    %s %s;\n", ct, field_name);
         }
         free(ct);
     }
