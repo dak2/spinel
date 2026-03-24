@@ -96,6 +96,19 @@ void emit_constructor(codegen_ctx_t *ctx, class_info_t *cls) {
     if (!init && cls->superclass[0]) {
         class_info_t *parent = find_class(ctx, cls->superclass);
         method_info_t *parent_init = parent ? find_method(parent, "initialize") : NULL;
+        if (parent && !parent_init) {
+            /* Parent has no initialize either: generate default constructor */
+            emit_raw(ctx, "static sp_%s *sp_%s_new(void) {\n", cls->name, cls->name);
+            if (ctx->needs_gc) {
+                emit_raw(ctx, "    sp_%s *self = (sp_%s *)sp_gc_alloc(sizeof(sp_%s), NULL, NULL);\n",
+                         cls->name, cls->name, cls->name);
+            } else {
+                emit_raw(ctx, "    sp_%s *self = (sp_%s *)calloc(1, sizeof(sp_%s));\n",
+                         cls->name, cls->name, cls->name);
+            }
+            emit_raw(ctx, "    return self;\n}\n\n");
+            return;
+        }
         if (parent && parent_init) {
             /* Generate: sp_Cat *sp_Cat_new(params...) { alloc; sp_Animal_initialize((sp_Animal*)self, params); return self; } */
             emit_raw(ctx, "static sp_%s *sp_%s_new(", cls->name, cls->name);
