@@ -52,7 +52,12 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
 
     case PM_FLOAT_NODE: {
         pm_float_node_t *n = (pm_float_node_t *)node;
-        return sfmt("%.17g", n->value);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%.17g", n->value);
+        /* Ensure it looks like a float literal in C (has '.' or 'e') */
+        if (!strchr(buf, '.') && !strchr(buf, 'e'))
+            return sfmt("%s.0", buf);
+        return xstrdup(buf);
     }
 
     case PM_STRING_NODE: {
@@ -3084,6 +3089,16 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                     r = sfmt("((mrb_int)floor(%s))", recv);
                 else if (strcmp(method, "round") == 0)
                     r = sfmt("((mrb_int)round(%s))", recv);
+                else if (strcmp(method, "to_i") == 0 || strcmp(method, "truncate") == 0)
+                    r = sfmt("((mrb_int)(%s))", recv);
+                else if (strcmp(method, "to_f") == 0)
+                    r = sfmt("%s", recv);
+                else if (strcmp(method, "**") == 0 && call->arguments &&
+                         call->arguments->arguments.size == 1) {
+                    char *exp = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("pow(%s, %s)", recv, exp);
+                    free(exp);
+                }
                 if (r) { free(recv); free(method); return r; }
                 free(recv);
             }
