@@ -239,14 +239,27 @@ int mega_dispatch_register(codegen_ctx_t *ctx, const char *method,
 /* ------------------------------------------------------------------ */
 
 var_entry_t *var_lookup(codegen_ctx_t *ctx, const char *name) {
-    for (int i = 0; i < ctx->var_count; i++)
+    /* Search current scope first (var_scope_floor..var_count) */
+    for (int i = ctx->var_scope_floor; i < ctx->var_count; i++)
+        if (ctx->vars[i].name[0] && strcmp(ctx->vars[i].name, name) == 0) return &ctx->vars[i];
+    /* Then search global/outer scope (0..var_scope_floor) */
+    for (int i = 0; i < ctx->var_scope_floor; i++)
         if (ctx->vars[i].name[0] && strcmp(ctx->vars[i].name, name) == 0) return &ctx->vars[i];
     return NULL;
 }
 
 var_entry_t *var_declare(codegen_ctx_t *ctx, const char *name,
                                 vtype_t type, bool is_constant) {
-    var_entry_t *v = var_lookup(ctx, name);
+    /* When inside a scoped region (var_scope_floor > 0), only look up within
+     * the current scope to avoid polluting outer scope variables with widening.
+     * For reads, var_lookup still searches both scopes. */
+    var_entry_t *v = NULL;
+    if (ctx->var_scope_floor > 0) {
+        for (int i = ctx->var_scope_floor; i < ctx->var_count; i++)
+            if (ctx->vars[i].name[0] && strcmp(ctx->vars[i].name, name) == 0) { v = &ctx->vars[i]; break; }
+    } else {
+        v = var_lookup(ctx, name);
+    }
     if (v) {
         /* Widen if types conflict */
         if (v->type.kind != type.kind && v->type.kind != SPINEL_TYPE_UNKNOWN) {
@@ -2755,6 +2768,8 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
         /* Also infer function body variables to detect array/hash usage */
         if (!ctx->needs_gc && f->body_node) {
             int saved_vc = ctx->var_count;
+            int saved_sf = ctx->var_scope_floor;
+            ctx->var_scope_floor = saved_vc;
             for (int j = 0; j < f->param_count; j++)
                 var_declare(ctx, f->params[j].name, f->params[j].type, false);
             infer_pass(ctx, f->body_node);
@@ -2767,6 +2782,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
                 }
             }
             ctx->var_count = saved_vc;
+            ctx->var_scope_floor = saved_sf;
         }
     }
     /* Also check class method bodies for array/hash usage */
@@ -2781,6 +2797,8 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
                 m->return_type.kind == SPINEL_TYPE_HASH) { ctx->needs_gc = true; break; }
             if (m->body_node) {
                 int saved_vc = ctx->var_count;
+                int saved_sf = ctx->var_scope_floor;
+                ctx->var_scope_floor = saved_vc;
                 for (int j = 0; j < m->param_count; j++)
                     var_declare(ctx, m->params[j].name, m->params[j].type, false);
                 infer_pass(ctx, m->body_node);
@@ -2793,6 +2811,7 @@ void codegen_program(codegen_ctx_t *ctx, pm_node_t *root) {
                     }
                 }
                 ctx->var_count = saved_vc;
+                ctx->var_scope_floor = saved_sf;
             }
         }
         ctx->parser = saved_gc;

@@ -1651,12 +1651,17 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                     !m->is_setter && strcmp(m->name, "initialize") != 0 && m->body_node) {
                     /* Temporarily register params in var table */
                     int sv = ctx->var_count;
+                    int sf = ctx->var_scope_floor;
+                    ctx->var_scope_floor = sv;
                     class_info_t *saved_cls = ctx->current_class;
                     ctx->current_class = cls;
                     for (int pi = 0; pi < m->param_count; pi++)
                         var_declare(ctx, m->params[pi].name, m->params[pi].type, false);
                     vtype_t rt = infer_type(ctx, m->body_node);
                     ctx->var_count = sv;
+                    ctx->var_scope_floor = sf;
+                    for (int ci = sv; ci < MAX_VARS && ctx->vars[ci].name[0]; ci++)
+                        ctx->vars[ci].name[0] = '\0';
                     ctx->current_class = saved_cls;
                     if (rt.kind != SPINEL_TYPE_VALUE && rt.kind != SPINEL_TYPE_UNKNOWN)
                         m->return_type = rt;
@@ -2118,6 +2123,8 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                         if (target) {
                             /* Register caller params AND body locals for type inference */
                             int sv = ctx->var_count;
+                            int sf = ctx->var_scope_floor;
+                            ctx->var_scope_floor = sv;
                             for (int cp = 0; cp < caller->param_count; cp++)
                                 var_declare(ctx, caller->params[cp].name, caller->params[cp].type, false);
                             infer_pass(ctx, caller->body_node);
@@ -2174,17 +2181,25 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                             }
                             }
                             ctx->var_count = sv;
+                            ctx->var_scope_floor = sf;
+                            for (int ci = sv; ci < MAX_VARS && ctx->vars[ci].name[0]; ci++)
+                                ctx->vars[ci].name[0] = '\0';
                         }
                         free(cn2);
                     }
                     /* Setter calls on typed receivers: recv.ivar=(val) → update ivar type */
                     if (cc->receiver && cc->arguments && cc->arguments->arguments.size == 1) {
                         int sv2 = ctx->var_count;
+                        int sf2 = ctx->var_scope_floor;
+                        ctx->var_scope_floor = sv2;
                         for (int cp = 0; cp < caller->param_count; cp++)
                             var_declare(ctx, caller->params[cp].name, caller->params[cp].type, false);
                         infer_pass(ctx, caller->body_node);
                         vtype_t recv_t = infer_type(ctx, cc->receiver);
                         ctx->var_count = sv2;
+                        ctx->var_scope_floor = sf2;
+                        for (int ci = sv2; ci < MAX_VARS && ctx->vars[ci].name[0]; ci++)
+                            ctx->vars[ci].name[0] = '\0';
                         if (recv_t.kind == SPINEL_TYPE_OBJECT) {
                             class_info_t *rcls = find_class(ctx, recv_t.klass);
                             if (rcls) {
@@ -2194,11 +2209,16 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                                     ivar_info_t *iv = find_ivar(rcls, sm->accessor_ivar);
                                     if (iv && (iv->type.kind == SPINEL_TYPE_VALUE || iv->type.kind == SPINEL_TYPE_NIL)) {
                                         int sv3 = ctx->var_count;
+                                        int sf3 = ctx->var_scope_floor;
+                                        ctx->var_scope_floor = sv3;
                                         for (int cp = 0; cp < caller->param_count; cp++)
                                             var_declare(ctx, caller->params[cp].name, caller->params[cp].type, false);
                                         infer_pass(ctx, caller->body_node);
                                         vtype_t at = infer_type(ctx, cc->arguments->arguments.nodes[0]);
                                         ctx->var_count = sv3;
+                                        ctx->var_scope_floor = sf3;
+                                        for (int ci = sv3; ci < MAX_VARS && ctx->vars[ci].name[0]; ci++)
+                                            ctx->vars[ci].name[0] = '\0';
                                         if (at.kind != SPINEL_TYPE_VALUE && at.kind != SPINEL_TYPE_NIL && at.kind != SPINEL_TYPE_UNKNOWN)
                                             iv->type = at;
                                     }
@@ -2261,6 +2281,8 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
             if (f->return_type.kind != SPINEL_TYPE_VALUE) continue;
             if (f->body_node) {
                 int sv = ctx->var_count;
+                int sf = ctx->var_scope_floor;
+                ctx->var_scope_floor = sv;
                 for (int pi = 0; pi < f->param_count; pi++)
                     var_declare(ctx, f->params[pi].name, f->params[pi].type, false);
                 /* Register &block parameter if present */
@@ -2270,6 +2292,9 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                 infer_pass(ctx, f->body_node);
                 vtype_t rt = infer_type(ctx, f->body_node);
                 ctx->var_count = sv;
+                ctx->var_scope_floor = sf;
+                for (int ci = sv; ci < MAX_VARS && ctx->vars[ci].name[0]; ci++)
+                    ctx->vars[ci].name[0] = '\0';
                 if (rt.kind != SPINEL_TYPE_VALUE)
                     f->return_type = rt;
             }
@@ -2456,6 +2481,8 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
 
                 /* Set up method params in var table for type inference */
                 int sv = ctx->var_count;
+                int sf = ctx->var_scope_floor;
+                ctx->var_scope_floor = sv;
                 class_info_t *saved_cls2 = ctx->current_class;
                 ctx->current_class = cls2;
                 for (int pi = 0; pi < m2->param_count; pi++)
@@ -2647,6 +2674,9 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
                 }
 
                 ctx->var_count = sv;
+                ctx->var_scope_floor = sf;
+                for (int ci = sv; ci < MAX_VARS && ctx->vars[ci].name[0]; ci++)
+                    ctx->vars[ci].name[0] = '\0';
                 ctx->current_class = saved_cls2;
             }
             ctx->parser = saved_cls_p;
@@ -2722,6 +2752,8 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
             if (m->return_type.kind != SPINEL_TYPE_VALUE) continue;
             if (!m->body_node) continue;
             int sv = ctx->var_count;
+            int sf = ctx->var_scope_floor;
+            ctx->var_scope_floor = sv;
             /* Register module ivars as local vars for inference */
             for (int vi = 0; vi < mod->var_count; vi++)
                 var_declare(ctx, mod->vars[vi].name, mod->vars[vi].type, false);
@@ -2730,6 +2762,7 @@ void resolve_class_types(codegen_ctx_t *ctx, pm_node_t *prog_root) {
             infer_pass(ctx, m->body_node);
             vtype_t rt = infer_type(ctx, m->body_node);
             ctx->var_count = sv;
+            ctx->var_scope_floor = sf;
             for (int ci = sv; ci < MAX_VARS && ctx->vars[ci].name[0]; ci++)
                 ctx->vars[ci].name[0] = '\0';
             if (rt.kind != SPINEL_TYPE_VALUE && rt.kind != SPINEL_TYPE_UNKNOWN)

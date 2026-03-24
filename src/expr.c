@@ -1865,6 +1865,8 @@ char *codegen_expr(codegen_ctx_t *ctx, pm_node_t *node) {
                         }
                         emit(ctx, "  } _red_%d = %s; }\n", tmp, acc_cn);
                         ctx->var_count = sv; /* restore var table */
+                        for (int ci = sv; ci < MAX_VARS && ctx->vars[ci].name[0]; ci++)
+                            ctx->vars[ci].name[0] = '\0';
                         free(acc_cn); free(elem_cn);
                     }
                     free(acc_name); free(elem_name); free(init_val);

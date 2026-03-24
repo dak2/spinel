@@ -328,6 +328,8 @@ void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m) {
     ctx->current_method = m;
     int saved_indent = ctx->indent;
     int saved_var_count = ctx->var_count;
+    int saved_scope_floor = ctx->var_scope_floor;
+    ctx->var_scope_floor = saved_var_count;
     /* Clear stale entries from previous function scopes */
     for (int i = saved_var_count; i < MAX_VARS; i++)
         ctx->vars[i].name[0] = '\0';
@@ -465,6 +467,7 @@ void emit_method(codegen_ctx_t *ctx, class_info_t *cls, method_info_t *m) {
     ctx->gc_scope_active = saved_gc_scope;
     ctx->indent = saved_indent;
     ctx->var_count = saved_var_count;
+    ctx->var_scope_floor = saved_scope_floor;
     ctx->current_class = NULL;
     ctx->current_method = NULL;
 
@@ -509,6 +512,8 @@ void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
 
     int saved_indent = ctx->indent;
     int saved_var_count = ctx->var_count;
+    int saved_scope_floor = ctx->var_scope_floor;
+    ctx->var_scope_floor = saved_var_count;
     /* Clear stale entries from previous function scopes */
     for (int i = saved_var_count; i < MAX_VARS; i++)
         ctx->vars[i].name[0] = '\0';
@@ -750,6 +755,7 @@ void emit_top_func(codegen_ctx_t *ctx, func_info_t *f) {
     ctx->gc_scope_active = saved_gc_scope;
     ctx->indent = saved_indent;
     ctx->var_count = saved_var_count;
+    ctx->var_scope_floor = saved_scope_floor;
     ctx->current_func_name[0] = '\0';
 
     emit_raw(ctx, "}\n\n");
@@ -823,6 +829,8 @@ void emit_module(codegen_ctx_t *ctx, module_info_t *mod) {
         /* Generate method body using the AST */
         int saved_indent = ctx->indent;
         int saved_var_count = ctx->var_count;
+        int saved_scope_floor = ctx->var_scope_floor;
+        ctx->var_scope_floor = saved_var_count;
         /* Clear stale entries from previous function scopes */
         for (int i = saved_var_count; i < MAX_VARS; i++)
             ctx->vars[i].name[0] = '\0';
@@ -862,6 +870,7 @@ void emit_module(codegen_ctx_t *ctx, module_info_t *mod) {
         ctx->current_module = NULL;
         ctx->indent = saved_indent;
         ctx->var_count = saved_var_count;
+        ctx->var_scope_floor = saved_scope_floor;
         emit_raw(ctx, "}\n\n");
     }
 

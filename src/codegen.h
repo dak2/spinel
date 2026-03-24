@@ -161,6 +161,7 @@ typedef struct {
     int indent;
     var_entry_t vars[MAX_VARS];
     int var_count;
+    int var_scope_floor;  /* var_lookup searches [var_scope_floor..var_count) first */
     int temp_counter;
     int for_depth;
 
