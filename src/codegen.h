@@ -37,6 +37,7 @@ typedef enum {
     SPINEL_TYPE_RB_HASH,   /* sp_RbHash * (heterogeneous hash: string key → sp_RbValue) */
     SPINEL_TYPE_SP_STRING, /* sp_String * (mutable, GC-managed string) */
     SPINEL_TYPE_FILE,      /* sp_File * (file object wrapping FILE *) */
+    SPINEL_TYPE_STRINGIO,  /* sp_StringIO * (in-memory IO) */
 } spinel_type_t;
 
 /* Extended type: kind + optional class name for OBJECT types */

@@ -777,6 +777,26 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
         }
     }
 
+    /* StringIO.new / StringIO.new("str") */
+    if (strcmp(method, "new") == 0 && call->receiver &&
+        PM_NODE_TYPE(call->receiver) == PM_CONSTANT_READ_NODE) {
+        pm_constant_read_node_t *_cr = (pm_constant_read_node_t *)call->receiver;
+        if (ceq(ctx, _cr->name, "StringIO")) {
+            ctx->needs_gc = true;
+            int argc = call->arguments ? (int)call->arguments->arguments.size : 0;
+            char *r;
+            if (argc > 0) {
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                r = sfmt("sp_StringIO_new_s(%s)", arg);
+                free(arg);
+            } else {
+                r = xstrdup("sp_StringIO_new()");
+            }
+            free(method);
+            return r;
+        }
+    }
+
     /* Constructor: ClassName.new(args) */
     if (strcmp(method, "new") == 0 && call->receiver &&
         PM_NODE_TYPE(call->receiver) == PM_CONSTANT_READ_NODE) {
@@ -2154,6 +2174,95 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
             free(recv);
         }
 
+        /* sp_StringIO instance method calls */
+        if (recv_t.kind == SPINEL_TYPE_STRINGIO) {
+            char *recv = codegen_expr(ctx, call->receiver);
+            int argc = call->arguments ? (int)call->arguments->arguments.size : 0;
+            char *r = NULL;
+            if (strcmp(method, "string") == 0)
+                r = sfmt("sp_StringIO_string(%s)", recv);
+            else if (strcmp(method, "pos") == 0 || strcmp(method, "tell") == 0)
+                r = sfmt("sp_StringIO_pos(%s)", recv);
+            else if (strcmp(method, "lineno") == 0)
+                r = sfmt("sp_StringIO_lineno(%s)", recv);
+            else if (strcmp(method, "size") == 0 || strcmp(method, "length") == 0)
+                r = sfmt("sp_StringIO_size(%s)", recv);
+            else if (strcmp(method, "write") == 0 && argc > 0) {
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                r = sfmt("sp_StringIO_write(%s, %s)", recv, arg);
+                free(arg);
+            } else if (strcmp(method, "puts") == 0) {
+                if (argc > 0) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_StringIO_puts(%s, %s)", recv, arg);
+                    free(arg);
+                } else {
+                    r = sfmt("sp_StringIO_puts_empty(%s)", recv);
+                }
+            } else if (strcmp(method, "print") == 0 && argc > 0) {
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                r = sfmt("sp_StringIO_print(%s, %s)", recv, arg);
+                free(arg);
+            } else if (strcmp(method, "putc") == 0 && argc > 0) {
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                r = sfmt("sp_StringIO_putc(%s, %s)", recv, arg);
+                free(arg);
+            } else if (strcmp(method, "read") == 0) {
+                if (argc > 0) {
+                    char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                    r = sfmt("sp_StringIO_read_n(%s, %s)", recv, arg);
+                    free(arg);
+                } else {
+                    r = sfmt("sp_StringIO_read(%s)", recv);
+                }
+            } else if (strcmp(method, "gets") == 0)
+                r = sfmt("sp_StringIO_gets(%s)", recv);
+            else if (strcmp(method, "getc") == 0)
+                r = sfmt("sp_StringIO_getc(%s)", recv);
+            else if (strcmp(method, "getbyte") == 0)
+                r = sfmt("sp_StringIO_getbyte(%s)", recv);
+            else if (strcmp(method, "rewind") == 0)
+                r = sfmt("sp_StringIO_rewind(%s)", recv);
+            else if (strcmp(method, "seek") == 0 && argc >= 1) {
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                if (argc >= 2) {
+                    char *arg2 = codegen_expr(ctx, call->arguments->arguments.nodes[1]);
+                    r = sfmt("sp_StringIO_seek(%s, %s, %s)", recv, arg, arg2);
+                    free(arg2);
+                } else {
+                    r = sfmt("sp_StringIO_seek(%s, %s, 0)", recv, arg);
+                }
+                free(arg);
+            } else if (strcmp(method, "eof?") == 0)
+                r = sfmt("sp_StringIO_eof_p(%s)", recv);
+            else if (strcmp(method, "truncate") == 0 && argc > 0) {
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                r = sfmt("sp_StringIO_truncate(%s, %s)", recv, arg);
+                free(arg);
+            } else if (strcmp(method, "close") == 0)
+                r = sfmt("sp_StringIO_close(%s)", recv);
+            else if (strcmp(method, "closed?") == 0)
+                r = sfmt("sp_StringIO_closed_p(%s)", recv);
+            else if (strcmp(method, "flush") == 0)
+                r = sfmt("sp_StringIO_flush(%s)", recv);
+            else if (strcmp(method, "sync") == 0)
+                r = sfmt("sp_StringIO_sync(%s)", recv);
+            else if (strcmp(method, "isatty") == 0 || strcmp(method, "tty?") == 0)
+                r = sfmt("sp_StringIO_isatty(%s)", recv);
+            else if (strcmp(method, "fileno") == 0)
+                r = sfmt("sp_StringIO_fileno(%s)", recv);
+            else if (strcmp(method, "<<") == 0 && argc > 0) {
+                char *arg = codegen_expr(ctx, call->arguments->arguments.nodes[0]);
+                r = sfmt("sp_StringIO_append(%s, %s)", recv, arg);
+                free(arg);
+            }
+            if (r) {
+                free(recv); free(method);
+                return r;
+            }
+            free(recv);
+        }
+
         /* sp_Range method calls */
         if (recv_t.kind == SPINEL_TYPE_RANGE) {
             char *recv = codegen_expr(ctx, call->receiver);
@@ -3111,6 +3220,18 @@ static char *codegen_expr_call(codegen_ctx_t *ctx, pm_call_node_t *call, pm_node
                             char *na = sfmt("%s, %s", args, a);
                             free(args); free(a);
                             args = na;
+                        }
+                        /* Fill defaults for missing optional positional params */
+                        for (int i = argc; i < m->param_count; i++) {
+                            if (m->params[i].is_optional && m->params[i].default_node) {
+                                pm_parser_t *sp = ctx->parser;
+                                if (m->origin_parser) ctx->parser = m->origin_parser;
+                                char *a = codegen_expr(ctx, (pm_node_t *)m->params[i].default_node);
+                                ctx->parser = sp;
+                                char *na = sfmt("%s, %s", args, a);
+                                free(args); free(a);
+                                args = na;
+                            }
                         }
                     }
 

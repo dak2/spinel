@@ -79,6 +79,7 @@ const char *spinel_type_cname(spinel_type_t k) {
     case SPINEL_TYPE_RB_HASH:  return "sp_RbHash *";
     case SPINEL_TYPE_SP_STRING: return "sp_String *";
     case SPINEL_TYPE_FILE:     return "sp_File *";
+    case SPINEL_TYPE_STRINGIO: return "sp_StringIO *";
     default:                  return "mrb_int"; /* fallback for standalone mode */
     }
 }
@@ -111,6 +112,7 @@ bool is_gc_type(codegen_ctx_t *ctx, vtype_t t) {
     if (t.kind == SPINEL_TYPE_ARRAY) return true;
     if (t.kind == SPINEL_TYPE_FLOAT_ARRAY) return true;
     if (t.kind == SPINEL_TYPE_HASH) return true;
+    if (t.kind == SPINEL_TYPE_STRINGIO) return true;
     if (t.kind == SPINEL_TYPE_OBJECT) {
         class_info_t *cls = find_class(ctx, t.klass);
         return cls && !cls->is_value_type;
@@ -333,6 +335,11 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
             if (ceq(ctx, cr->name, "File") && strcmp(method, "open") == 0) {
                 free(method);
                 return vt_prim(SPINEL_TYPE_FILE);
+            }
+            /* StringIO.new → SPINEL_TYPE_STRINGIO */
+            if (ceq(ctx, cr->name, "StringIO") && strcmp(method, "new") == 0) {
+                free(method);
+                return vt_prim(SPINEL_TYPE_STRINGIO);
             }
         }
 
@@ -581,6 +588,31 @@ vtype_t infer_type(codegen_ctx_t *ctx, pm_node_t *node) {
                 if (strcmp(method, "to_f") == 0) { free(method); return vt_prim(SPINEL_TYPE_FLOAT); }
                 if (strcmp(method, "each_line") == 0 || strcmp(method, "chars") == 0) { free(method); return vt_prim(SPINEL_TYPE_STR_ARRAY); }
                 if (strcmp(method, "bytes") == 0) { free(method); return vt_prim(SPINEL_TYPE_ARRAY); }
+            }
+            /* StringIO instance methods */
+            if (recv_t.kind == SPINEL_TYPE_STRINGIO) {
+                if (strcmp(method, "string") == 0 || strcmp(method, "read") == 0 ||
+                    strcmp(method, "gets") == 0 || strcmp(method, "getc") == 0) {
+                    free(method); return vt_prim(SPINEL_TYPE_STRING);
+                }
+                if (strcmp(method, "write") == 0 || strcmp(method, "pos") == 0 ||
+                    strcmp(method, "tell") == 0 || strcmp(method, "size") == 0 ||
+                    strcmp(method, "length") == 0 || strcmp(method, "lineno") == 0 ||
+                    strcmp(method, "rewind") == 0 || strcmp(method, "seek") == 0 ||
+                    strcmp(method, "truncate") == 0 || strcmp(method, "close") == 0 ||
+                    strcmp(method, "getbyte") == 0 || strcmp(method, "fileno") == 0 ||
+                    strcmp(method, "puts") == 0 || strcmp(method, "print") == 0 ||
+                    strcmp(method, "putc") == 0) {
+                    free(method); return vt_prim(SPINEL_TYPE_INTEGER);
+                }
+                if (strcmp(method, "eof?") == 0 || strcmp(method, "closed?") == 0 ||
+                    strcmp(method, "sync") == 0 || strcmp(method, "isatty") == 0 ||
+                    strcmp(method, "tty?") == 0) {
+                    free(method); return vt_prim(SPINEL_TYPE_BOOLEAN);
+                }
+                if (strcmp(method, "flush") == 0) {
+                    free(method); return vt_prim(SPINEL_TYPE_STRINGIO);
+                }
             }
             /* File instance methods on FILE-typed receiver */
             if (recv_t.kind == SPINEL_TYPE_FILE) {
