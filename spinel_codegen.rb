@@ -2872,9 +2872,20 @@ class Compiler
                 ct = ptypes[k]
                 if ct != at
                   if ct != "poly"
-                    # Types differ - mark as poly
-                    ptypes[k] = "poly"
-                    @needs_rb_value = 1
+                    # Only mark as poly if both types are meaningful
+                    # (not just default "int" vs actual type)
+                    if ct == "int"
+                      # First real type seen - update, don't mark poly
+                      ptypes[k] = at
+                    else
+                      if at == "int"
+                        # arg is int, param already has a type - keep it
+                      else
+                        # Genuinely different types - mark poly
+                        ptypes[k] = "poly"
+                        @needs_rb_value = 1
+                      end
+                    end
                   end
                 end
               end
