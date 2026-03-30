@@ -213,7 +213,7 @@ def serialize_node(node)
   when Prism::StringNode
     {
       "type" => "StringNode",
-      "content" => node.content
+      "content" => node.unescaped
     }
 
   when Prism::InterpolatedStringNode

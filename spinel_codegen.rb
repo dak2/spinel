@@ -1000,6 +1000,17 @@ class Compiler
         if lt == "float"
           return "float"
         end
+        # Check RHS for float promotion
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length > 0
+            rt2 = infer_type(aargs[0])
+            if rt2 == "float"
+              return "float"
+            end
+          end
+        end
       end
       return "int"
     end
@@ -1008,6 +1019,17 @@ class Compiler
         lt = infer_type(recv)
         if lt == "float"
           return "float"
+        end
+        # Check RHS for float promotion
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length > 0
+            rt2 = infer_type(aargs[0])
+            if rt2 == "float"
+              return "float"
+            end
+          end
         end
       end
       return "int"
@@ -1024,6 +1046,17 @@ class Compiler
         if lt == "poly"
           return "poly"
         end
+        # Check RHS for float promotion
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length > 0
+            rt2 = infer_type(aargs[0])
+            if rt2 == "float"
+              return "float"
+            end
+          end
+        end
       end
       return "int"
     end
@@ -1032,6 +1065,17 @@ class Compiler
         lt = infer_type(recv)
         if lt == "float"
           return "float"
+        end
+        # Check RHS for float promotion
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length > 0
+            rt2 = infer_type(aargs[0])
+            if rt2 == "float"
+              return "float"
+            end
+          end
         end
       end
       return "int"
@@ -9280,6 +9324,21 @@ class Compiler
       if op == "%"
         emit("  lv_" + @nd_name[nid] + " = sp_imod(lv_" + @nd_name[nid] + ", " + val + ");")
       end
+      if op == "<<"
+        emit("  lv_" + @nd_name[nid] + " <<= " + val + ";")
+      end
+      if op == ">>"
+        emit("  lv_" + @nd_name[nid] + " >>= " + val + ";")
+      end
+      if op == "&"
+        emit("  lv_" + @nd_name[nid] + " &= " + val + ";")
+      end
+      if op == "|"
+        emit("  lv_" + @nd_name[nid] + " |= " + val + ";")
+      end
+      if op == "^"
+        emit("  lv_" + @nd_name[nid] + " ^= " + val + ";")
+      end
       return
     end
     if t == "InstanceVariableWriteNode"
@@ -10477,8 +10536,20 @@ class Compiler
     arg_ids = get_args(args_id)
     k = 0
     while k < arg_ids.length
-      at = infer_type(arg_ids[k])
-      val = compile_expr(arg_ids[k])
+      aid = arg_ids[k]
+      # Detect x.chr pattern and use putchar for binary-safe output
+      if @nd_type[aid] == "CallNode"
+        if @nd_name[aid] == "chr"
+          if @nd_receiver[aid] >= 0
+            rchr = compile_expr(@nd_receiver[aid])
+            emit("  putchar((unsigned char)" + rchr + ");")
+            k = k + 1
+            next
+          end
+        end
+      end
+      at = infer_type(aid)
+      val = compile_expr(aid)
       if at == "int"
         emit("  printf(\"%lld\", (long long)" + val + ");")
       else
