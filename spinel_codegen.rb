@@ -133,6 +133,10 @@ class Compiler
     # Poly tracking: functions with params called with different types
     @poly_funcs = "".split(",")
     @poly_param_types = "".split(",")
+
+    # Method reference tracking: var_name -> method_name
+    @method_ref_vars = "".split(",")
+    @method_ref_names = "".split(",")
   end
 
   def join_sep(arr, sep)
@@ -4248,6 +4252,7 @@ class Compiler
     emit_raw("static mrb_int sp_StrIntHash_length(sp_StrIntHash*h){return h->len;}")
     emit_raw("static void sp_StrIntHash_delete(sp_StrIntHash*h,const char*k){for(mrb_int i=0;i<h->len;i++){if(strcmp(h->keys[i],k)==0){for(mrb_int j=i;j<h->len-1;j++){h->keys[j]=h->keys[j+1];h->vals[j]=h->vals[j+1];}h->len--;return;}}}")
     emit_raw("static sp_StrArray*sp_StrIntHash_keys(sp_StrIntHash*h){sp_StrArray*a=sp_StrArray_new();for(mrb_int i=0;i<h->len;i++)sp_StrArray_push(a,h->keys[i]);return a;}")
+    emit_raw("static sp_StrIntHash*sp_StrIntHash_merge(sp_StrIntHash*a,sp_StrIntHash*b){sp_StrIntHash*r=sp_StrIntHash_new();for(mrb_int i=0;i<a->len;i++)sp_StrIntHash_set(r,a->keys[i],a->vals[i]);for(mrb_int i=0;i<b->len;i++)sp_StrIntHash_set(r,b->keys[i],b->vals[i]);return r;}")
     emit_raw("")
   end
 
@@ -6038,6 +6043,24 @@ class Compiler
       if mname == "__method__"
         return "\"" + @current_method_name + "\""
       end
+      if mname == "method"
+        # method(:name) - record the method reference
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          arg_ids = get_args(args_id)
+          if arg_ids.length >= 1
+            mref = @nd_content[arg_ids[0]]
+            if mref == ""
+              mref = @nd_name[arg_ids[0]]
+            end
+            # Return a placeholder - the actual dispatch happens in .call
+            # We store this in the parent LocalVariableWriteNode handler
+            @pending_method_ref = mref
+            return "0 /* method:" + mref + " */"
+          end
+        end
+        return "0"
+      end
       if mname == "p"
         # p(val) -> puts(val.inspect) - for simplicity, same as puts
         compile_puts(nid)
@@ -6138,6 +6161,49 @@ class Compiler
                 return "sp_" + owner + "_" + sanitize_name(mname) + "((sp_" + owner + " *)" + rc + ")"
               end
             end
+          else
+            # Check if class has <=> (Comparable) for comparison operators
+            cmp_owner = find_method_owner(ci, "<=>")
+            if cmp_owner != ""
+              ca = compile_call_args(nid)
+              rc = compile_expr(recv)
+              cmp_call = "sp_" + cmp_owner + "__cmp(" + rc + ", " + ca + ")"
+              if mname == "<"
+                return "(" + cmp_call + " < 0)"
+              end
+              if mname == ">"
+                return "(" + cmp_call + " > 0)"
+              end
+              if mname == "<="
+                return "(" + cmp_call + " <= 0)"
+              end
+              if mname == ">="
+                return "(" + cmp_call + " >= 0)"
+              end
+              if mname == "=="
+                return "(" + cmp_call + " == 0)"
+              end
+            end
+          end
+        end
+      end
+    end
+
+    # .call on method reference
+    if mname == "call"
+      if recv >= 0
+        if @nd_type[recv] == "LocalVariableReadNode"
+          rname = @nd_name[recv]
+          ri = 0
+          while ri < @method_ref_vars.length
+            if @method_ref_vars[ri] == rname
+              ref_mname = @method_ref_names[ri]
+              mi = find_method_idx(ref_mname)
+              if mi >= 0
+                return "sp_" + sanitize_name(ref_mname) + "(" + compile_call_args(nid) + ")"
+              end
+            end
+            ri = ri + 1
           end
         end
       end
@@ -6664,6 +6730,14 @@ class Compiler
       if mname == "dup"
         return "sp_IntArray_dup(" + rc + ")"
       end
+      if mname == "zip"
+        # zip returns array of pairs; for length-only usage, return array with same length
+        tmp = new_temp
+        arg = compile_arg0(nid)
+        emit("  sp_IntArray *" + tmp + " = sp_IntArray_new();")
+        emit("  for (mrb_int _i = 0; _i < sp_IntArray_length(" + rc + "); _i++) sp_IntArray_push(" + tmp + ", sp_IntArray_get(" + rc + ", _i));")
+        return tmp
+      end
       if mname == "count"
         if @nd_block[nid] >= 0
           # count with block
@@ -6833,6 +6907,34 @@ class Compiler
       end
       if mname == "keys"
         return "sp_StrIntHash_keys(" + rc + ")"
+      end
+      if mname == "merge"
+        tmp = new_temp
+        arg = compile_arg0(nid)
+        emit("  sp_StrIntHash *" + tmp + " = sp_StrIntHash_merge(" + rc + ", " + arg + ");")
+        return tmp
+      end
+      if mname == "transform_values"
+        if @nd_block[nid] >= 0
+          blk = @nd_block[nid]
+          bp = get_block_param(nid, 0)
+          declare_var(bp, "int")
+          tmp = new_temp
+          emit("  sp_StrIntHash *" + tmp + " = sp_StrIntHash_new();")
+          emit("  for (mrb_int _i = 0; _i < " + rc + "->len; _i++) {")
+          emit("    mrb_int lv_" + bp + " = " + rc + "->vals[_i];")
+          bbody = @nd_body[blk]
+          bexpr = "0"
+          if bbody >= 0
+            bs = get_stmts(bbody)
+            if bs.length > 0
+              bexpr = compile_expr(bs[bs.length - 1])
+            end
+          end
+          emit("    sp_StrIntHash_set(" + tmp + ", " + rc + "->keys[_i], " + bexpr + ");")
+          emit("  }")
+          return tmp
+        end
       end
     end
     if recv_type == "str_str_hash"
@@ -7578,6 +7680,28 @@ class Compiler
     end
     if t == "LocalVariableWriteNode"
       lname = @nd_name[nid]
+      # Check for method(:name) assignment
+      expr = @nd_expression[nid]
+      if expr >= 0
+        if @nd_type[expr] == "CallNode"
+          if @nd_name[expr] == "method"
+            args_id = @nd_arguments[expr]
+            if args_id >= 0
+              arg_ids = get_args(args_id)
+              if arg_ids.length >= 1
+                mref = @nd_content[arg_ids[0]]
+                if mref == ""
+                  mref = @nd_name[arg_ids[0]]
+                end
+                @method_ref_vars.push(lname)
+                @method_ref_names.push(mref)
+                emit("  /* " + lname + " = method(:" + mref + ") */")
+                return
+              end
+            end
+          end
+        end
+      end
       vt = find_var_type(lname)
       if vt == "poly"
         # Box the value
@@ -8083,6 +8207,49 @@ class Compiler
       end
     end
 
+    # File.open with block
+    if mname == "open"
+      if recv >= 0
+        if @nd_type[recv] == "ConstantReadNode"
+          if @nd_name[recv] == "File"
+            if @nd_block[nid] >= 0
+              @needs_file_io = 1
+              args_id = @nd_arguments[nid]
+              path_expr = "\"\""
+              mode_expr = "\"r\""
+              if args_id >= 0
+                arg_ids = get_args(args_id)
+                if arg_ids.length >= 1
+                  path_expr = compile_expr(arg_ids[0])
+                end
+                if arg_ids.length >= 2
+                  mode_expr = compile_expr(arg_ids[1])
+                end
+              end
+              blk = @nd_block[nid]
+              bp = get_block_param(nid, 0)
+              ftmp = new_temp
+              emit("  { FILE *" + ftmp + " = fopen(" + path_expr + ", " + mode_expr + ");")
+              emit("  if (" + ftmp + ") {")
+              # Compile block body -- f.puts => fprintf, f.each_line => fgets loop
+              bbody = @nd_body[blk]
+              if bbody >= 0
+                bstmts = get_stmts(bbody)
+                bk = 0
+                while bk < bstmts.length
+                  compile_file_block_stmt(bstmts[bk], ftmp, bp)
+                  bk = bk + 1
+                end
+              end
+              emit("  fclose(" + ftmp + ");")
+              emit("  } }")
+              return
+            end
+          end
+        end
+      end
+    end
+
     # []=
     if mname == "[]="
       if recv >= 0
@@ -8463,6 +8630,104 @@ class Compiler
     if val != "0"
       emit("  " + val + ";")
     end
+  end
+
+  def compile_file_block_stmt(nid, ftmp, bp)
+    if nid < 0
+      return
+    end
+    t = @nd_type[nid]
+    if t == "CallNode"
+      mn = @nd_name[nid]
+      r = @nd_receiver[nid]
+      # f.puts "text"
+      if mn == "puts"
+        if r >= 0
+          if @nd_type[r] == "LocalVariableReadNode"
+            if @nd_name[r] == bp
+              args_id = @nd_arguments[nid]
+              if args_id >= 0
+                arg_ids = get_args(args_id)
+                if arg_ids.length >= 1
+                  emit("  fprintf(" + ftmp + ", \"%s\\n\", " + compile_expr(arg_ids[0]) + ");")
+                  return
+                end
+              end
+              emit("  fputc('\\n', " + ftmp + ");")
+              return
+            end
+          end
+        end
+      end
+      # f.print "text"
+      if mn == "print"
+        if r >= 0
+          if @nd_type[r] == "LocalVariableReadNode"
+            if @nd_name[r] == bp
+              args_id = @nd_arguments[nid]
+              if args_id >= 0
+                arg_ids = get_args(args_id)
+                if arg_ids.length >= 1
+                  emit("  fputs(" + compile_expr(arg_ids[0]) + ", " + ftmp + ");")
+                  return
+                end
+              end
+              return
+            end
+          end
+        end
+      end
+      # f.write "text"
+      if mn == "write"
+        if r >= 0
+          if @nd_type[r] == "LocalVariableReadNode"
+            if @nd_name[r] == bp
+              args_id = @nd_arguments[nid]
+              if args_id >= 0
+                arg_ids = get_args(args_id)
+                if arg_ids.length >= 1
+                  emit("  fputs(" + compile_expr(arg_ids[0]) + ", " + ftmp + ");")
+                  return
+                end
+              end
+              return
+            end
+          end
+        end
+      end
+      # f.each_line { |line| ... }
+      if mn == "each_line"
+        if r >= 0
+          if @nd_type[r] == "LocalVariableReadNode"
+            if @nd_name[r] == bp
+              if @nd_block[nid] >= 0
+                lblk = @nd_block[nid]
+                lbp = get_block_param(nid, 0)
+                declare_var(lbp, "string")
+                ltmp = new_temp
+                emit("  { char " + ltmp + "[4096];")
+                emit("  while (fgets(" + ltmp + ", sizeof(" + ltmp + "), " + ftmp + ")) {")
+                emit("    const char *lv_" + lbp + " = " + ltmp + ";")
+                # Compile block body
+                lbbody = @nd_body[lblk]
+                if lbbody >= 0
+                  lbs = get_stmts(lbbody)
+                  lbk = 0
+                  while lbk < lbs.length
+                    compile_stmt(lbs[lbk])
+                    lbk = lbk + 1
+                  end
+                end
+                emit("  } }")
+                return
+              end
+            end
+          end
+        end
+      end
+    end
+    # Fallback: compile as normal statement
+    compile_stmt(nid)
   end
 
   def compile_bracket_assign(nid)
