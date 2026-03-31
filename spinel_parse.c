@@ -89,7 +89,7 @@ static void emit_int(int id, const char *field, long long val) {
 
 static void emit_float(int id, const char *field, double val) {
   char buf[64];
-  snprintf(buf, sizeof(buf), "%g", val);
+  snprintf(buf, sizeof(buf), "%.17g", val);
   /* Ensure there's a decimal point (Ruby outputs 0.0, not 0) */
   if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E'))
     strcat(buf, ".0");
@@ -148,7 +148,7 @@ static int flatten(pm_node_t *node) {
 #define F(field, val) emit_float(id, field, val)
 #define R(field, child) emit_ref(id, field, (pm_node_t *)(child))
 #define A(field, list) emit_node_array(id, field, list)
-#define NAME(field, cid) S(field, cstr(cid))
+#define NAME(field, cid) do { char *_n = cstr(cid); char *_e = escape_str((const uint8_t *)_n, strlen(_n)); emit_str(id, field, _e); free(_e); free(_n); } while(0)
 
   switch (t) {
   case PM_PROGRAM_NODE: {
