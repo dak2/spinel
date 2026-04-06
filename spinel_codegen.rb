@@ -2173,7 +2173,7 @@ class Compiler
     if t == "mutable_str"
       return 1
     end
-    if t == "fiber"
+    if t == "fiber" || t == "bigint"
       return 1
     end
     if is_obj_type(t) == 1
@@ -7716,6 +7716,9 @@ class Compiler
       if @needs_rb_value == 1 || @needs_lambda == 1 || @needs_fiber == 1
         @needs_gc = 1
       end
+      if @needs_bigint == 1
+        @needs_gc = 1
+      end
     end
   end
 
@@ -9275,6 +9278,9 @@ class Compiler
     @in_main = 1
     @indent = 1
     push_scope
+    if @needs_gc == 1
+      emit("  SP_GC_SAVE();")
+    end
 
     # Pre-declare main locals
     lnames = "".split(",")
@@ -13133,6 +13139,8 @@ class Compiler
         else
           emit("  " + vref + " = sp_bigint_new_int(" + val + ");")
         end
+        # Trigger GC after bigint statement (safe point - all results stored in vars)
+        emit("  if(sp_gc_bytes>sp_gc_threshold){size_t _b=sp_gc_bytes;sp_gc_collect();size_t _f=_b-sp_gc_bytes;if(_f<_b/4)sp_gc_threshold=_b*2;else if(sp_gc_bytes>0){sp_gc_threshold=sp_gc_bytes*4;if(sp_gc_threshold<sp_gc_threshold_init)sp_gc_threshold=sp_gc_threshold_init;}else sp_gc_threshold=sp_gc_threshold_init;}")
         return
       end
       if vt == "poly"
@@ -13182,6 +13190,7 @@ class Compiler
         if op == "/"
           emit("  " + vref + " = sp_bigint_div(" + vref + ", " + barg + ");")
         end
+        emit("  if(sp_gc_bytes>sp_gc_threshold){size_t _b=sp_gc_bytes;sp_gc_collect();size_t _f=_b-sp_gc_bytes;if(_f<_b/4)sp_gc_threshold=_b*2;else if(sp_gc_bytes>0){sp_gc_threshold=sp_gc_bytes*4;if(sp_gc_threshold<sp_gc_threshold_init)sp_gc_threshold=sp_gc_threshold_init;}else sp_gc_threshold=sp_gc_threshold_init;}")
         return
       end
       if op == "+"
