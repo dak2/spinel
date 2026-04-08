@@ -44,20 +44,25 @@ parse: spinel_parse
 spinel_parse: spinel_parse.c $(PRISM_LIB)
 	$(CC) $(CFLAGS) -I$(PRISM_INC) $< $(PRISM_LIB) -lm -o $@
 
-# ---- Regexp library (for programs using /pattern/) ----
+# ---- Runtime library (regexp + bigint) ----
 
 RE_SRC = lib/regexp/re_compile.c lib/regexp/re_exec.c lib/regexp/re_utf8.c
 RE_OBJ = $(patsubst lib/regexp/%.c,build/regexp/%.o,$(RE_SRC))
-RE_LIB = lib/regexp/libspre.a
-
-regexp: $(RE_LIB)
-
-$(RE_LIB): $(RE_OBJ)
-	ar rcs $@ $^
 
 build/regexp/%.o: lib/regexp/%.c lib/regexp/re_internal.h
 	@mkdir -p build/regexp
 	$(CC) -c -O2 -Ilib/regexp $< -o $@
+
+build/sp_bigint.o: lib/sp_bigint.c lib/sp_bigint.h lib/mruby_shim.h
+	@mkdir -p build
+	$(CC) -c -O2 -Wno-all -Ilib lib/sp_bigint.c -o build/sp_bigint.o
+
+SP_RT_LIB = lib/libspinel_rt.a
+
+$(SP_RT_LIB): $(RE_OBJ) build/sp_bigint.o
+	ar rcs $@ $^
+
+regexp: $(SP_RT_LIB)
 
 # ---- Bootstrap ----
 
@@ -79,23 +84,14 @@ spinel_codegen: spinel_codegen.rb spinel_parse
 
 # ---- Test ----
 
-build/sp_bigint.o: lib/sp_bigint.c lib/sp_bigint.h lib/mruby_shim.h
-	@mkdir -p build
-	$(CC) -c -O2 -Wno-all -Ilib lib/sp_bigint.c -o build/sp_bigint.o
-
-BI_LIB = lib/libspbi.a
-
-$(BI_LIB): build/sp_bigint.o
-	ar rcs $@ $^
-
-test: spinel_parse $(BI_LIB) $(RE_LIB)
+test: spinel_parse $(SP_RT_LIB)
 	@if [ ! -f spinel_codegen ]; then echo "Run 'make bootstrap' first"; exit 1; fi
 	@pass=0; fail=0; err=0; \
 	for f in test/*.rb; do \
 	  bn=$$(basename "$$f" .rb); \
 	  ./spinel_parse "$$f" /tmp/_sp_t.ast 2>/dev/null && \
 	  ./spinel_codegen /tmp/_sp_t.ast /tmp/_sp_t.c 2>/dev/null && \
-	  $(CC) $(CFLAGS) /tmp/_sp_t.c $(BI_LIB) $(RE_LIB) -lm -o /tmp/_sp_t_bin 2>/dev/null; \
+	  $(CC) $(CFLAGS) /tmp/_sp_t.c $(SP_RT_LIB) -lm -o /tmp/_sp_t_bin 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
 	    expected=$$(timeout 10 ruby "$$f" 2>/dev/null); \
 	    actual=$$(timeout 10 /tmp/_sp_t_bin 2>/dev/null); \
@@ -111,14 +107,14 @@ test: spinel_parse $(BI_LIB) $(RE_LIB)
 	rm -f /tmp/_sp_t.ast /tmp/_sp_t.c /tmp/_sp_t_bin; \
 	echo "Tests: $$pass pass, $$fail fail, $$err error"
 
-bench: spinel_parse $(BI_LIB) $(RE_LIB)
+bench: spinel_parse $(SP_RT_LIB)
 	@if [ ! -f spinel_codegen ]; then echo "Run 'make bootstrap' first"; exit 1; fi
 	@pass=0; fail=0; skip=0; \
 	for f in benchmark/*.rb; do \
 	  bn=$$(basename "$$f" .rb); \
 	  timeout 10 ./spinel_parse "$$f" /tmp/_sp_b.ast 2>/dev/null && \
 	  timeout 10 ./spinel_codegen /tmp/_sp_b.ast /tmp/_sp_b.c 2>/dev/null && \
-	  $(CC) $(CFLAGS) /tmp/_sp_b.c $(BI_LIB) $(RE_LIB) -lm -o /tmp/_sp_b_bin 2>/dev/null; \
+	  $(CC) $(CFLAGS) /tmp/_sp_b.c $(SP_RT_LIB) -lm -o /tmp/_sp_b_bin 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
 	    expected=$$(timeout 60 ruby "$$f" 2>/dev/null); \
 	    ruby_rc=$$?; \
@@ -145,13 +141,13 @@ PREFIX   ?= /usr/local
 SPNLDIR   = $(PREFIX)/lib/spinel
 
 install: all
-	install -d $(SPNLDIR)/lib/regexp
+	install -d $(SPNLDIR)/lib
 	install -m 755 spinel           $(SPNLDIR)/
 	install -m 755 spinel_parse $(SPNLDIR)/
 	install -m 755 spinel_codegen   $(SPNLDIR)/
 	install -m 644 spinel_parse.rb  $(SPNLDIR)/
 	install -m 644 spinel_codegen.rb $(SPNLDIR)/
-	install -m 644 lib/regexp/libspre.a $(SPNLDIR)/lib/regexp/
+	install -m 644 lib/libspinel_rt.a $(SPNLDIR)/lib/
 	install -d $(PREFIX)/bin
 	ln -sf $(SPNLDIR)/spinel $(PREFIX)/bin/spinel
 
