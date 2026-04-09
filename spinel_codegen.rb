@@ -1073,6 +1073,23 @@ class Compiler
           return "float_array"
         end
       end
+      # Check if all elements are the same obj type → ptr_array
+      if is_obj_type(et) == 1
+        all_same = 1
+        k = 1
+        while k < elems.length
+          if infer_type(elems[k]) != et
+            all_same = 0
+          end
+          k = k + 1
+        end
+        if all_same == 1
+          @needs_ptr_array = 1
+          @needs_gc = 1
+          return et + "_ptr_array"
+        end
+        return "poly_array"
+      end
       # Check if elements have mixed types
       k = 1
       while k < elems.length
@@ -13228,6 +13245,17 @@ class Compiler
       end
       return tmp
     end
+    if is_ptr_array_type(arr_type) == 1
+      @needs_ptr_array = 1
+      tmp = new_temp
+      emit("  sp_PtrArray *" + tmp + " = sp_PtrArray_new();")
+      k = 0
+      while k < elems.length
+        emit("  sp_PtrArray_push(" + tmp + ", " + compile_expr(elems[k]) + ");")
+        k = k + 1
+      end
+      return tmp
+    end
     @needs_int_array = 1
     tmp = new_temp
     emit("  sp_IntArray *" + tmp + " = sp_IntArray_new();")
@@ -14390,7 +14418,7 @@ class Compiler
         # For object types with yield-using each, use yield method call
         if recv >= 0
           ert = infer_type(recv)
-          if is_obj_type(ert) == 1
+          if is_obj_type(ert) == 1 && is_ptr_array_type(ert) == 0
             # Fall through to yield method handler below
           else
             compile_each_block(nid)
@@ -15865,6 +15893,18 @@ class Compiler
       emit("  for (mrb_int " + tmp + " = 0; " + tmp + " < sp_" + pfx + "_length(" + rc + "); " + tmp + "++) {")
       if has_bp == 1
         emit("    lv_" + bp1 + " = sp_" + pfx + "_get(" + rc + ", " + tmp + ");")
+      end
+      @indent = @indent + 1
+      compile_stmts_body(@nd_body[@nd_block[nid]])
+      @indent = @indent - 1
+      emit("  }")
+    end
+    if is_ptr_array_type(rt) == 1
+      tmp = new_temp
+      emit("  for (mrb_int " + tmp + " = 0; " + tmp + " < sp_PtrArray_length(" + rc + "); " + tmp + "++) {")
+      if has_bp == 1
+        elem_type = ptr_array_elem_type(rt)
+        emit("    lv_" + bp1 + " = (" + c_type(elem_type) + ")sp_PtrArray_get(" + rc + ", " + tmp + ");")
       end
       @indent = @indent + 1
       compile_stmts_body(@nd_body[@nd_block[nid]])
