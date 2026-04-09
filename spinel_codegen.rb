@@ -906,14 +906,34 @@ class Compiler
       return infer_call_type(nid)
     end
     if t == "IfNode"
+      then_type = "nil"
       body = @nd_body[nid]
       if body >= 0
         stmts = get_stmts(body)
         if stmts.length > 0
-          return infer_type(stmts.last)
+          then_type = infer_type(stmts.last)
         end
       end
-      return "void"
+      else_type = "nil"
+      sub = @nd_subsequent[nid]
+      if sub >= 0
+        if @nd_type[sub] == "ElseNode"
+          ebody = @nd_body[sub]
+          if ebody >= 0
+            es = get_stmts(ebody)
+            if es.length > 0
+              else_type = infer_type(es.last)
+            end
+          end
+        else
+          # elsif chain — recurse
+          else_type = infer_type(sub)
+        end
+      end
+      types = "".split(",")
+      types.push(then_type)
+      types.push(else_type)
+      return unify_return_type(types)
     end
     if t == "CaseMatchNode"
       # Infer from first in branch
