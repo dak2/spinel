@@ -5080,85 +5080,129 @@ class Compiler
     if stmts.length == 0
       return "void"
     end
-    # Check for explicit returns
-    rt = scan_return_type_nid(body_id)
-    if rt != ""
-      return rt
-    end
-    # Last expression
-    infer_type(stmts.last)
+    # Collect all explicit return types
+    types = "".split(",")
+    collect_return_types_nid(body_id, types)
+    # Add implicit return (last expression)
+    last_type = infer_type(stmts.last)
+    types.push(last_type)
+    # Unify all return path types
+    unify_return_type(types)
   end
 
-  def scan_return_type_nid(nid)
+  def collect_return_types_nid(nid, types)
     stmts = get_stmts(nid)
-    i = 0
-    while i < stmts.length
-      rt = scan_return_type(stmts[i])
-      if rt != ""
-        return rt
-      end
-      i = i + 1
+    k = 0
+    while k < stmts.length
+      collect_return_types(stmts[k], types)
+      k = k + 1
     end
-    ""
   end
 
-  def scan_return_type(nid)
+  def collect_return_types(nid, types)
     if nid < 0
-      return ""
+      return
     end
     if @nd_type[nid] == "ReturnNode"
       args_id = @nd_arguments[nid]
       if args_id >= 0
         arg_ids = get_args(args_id)
         if arg_ids.length > 0
-          return infer_type(arg_ids[0])
+          types.push(infer_type(arg_ids[0]))
+          return
         end
       end
-      return "void"
+      types.push("nil")
+      return
+    end
+    # Don't recurse into nested method definitions
+    if @nd_type[nid] == "DefNode"
+      return
     end
     if @nd_type[nid] == "IfNode"
-      r1 = ""
       body = @nd_body[nid]
       if body >= 0
-        r1 = scan_return_type_nid(body)
+        collect_return_types_nid(body, types)
       end
       sub = @nd_subsequent[nid]
       if sub >= 0
-        r2 = scan_return_type(sub)
-        if r2 != ""
-          r1 = r2
-        end
+        collect_return_types(sub, types)
       end
-      return r1
+      return
     end
     if @nd_type[nid] == "ElseNode"
       body = @nd_body[nid]
       if body >= 0
-        return scan_return_type_nid(body)
+        collect_return_types_nid(body, types)
       end
+      return
     end
     if @nd_type[nid] == "WhileNode"
       body = @nd_body[nid]
       if body >= 0
-        return scan_return_type_nid(body)
+        collect_return_types_nid(body, types)
       end
+      return
     end
     if @nd_type[nid] == "CaseMatchNode"
       conds = parse_id_list(@nd_conditions[nid])
-      if conds.length > 0
-        inid = conds.first
+      k = 0
+      while k < conds.length
+        inid = conds[k]
         if @nd_type[inid] == "InNode"
           ibody = @nd_body[inid]
           if ibody >= 0
-            rt = scan_return_type_nid(ibody)
-            if rt != ""
-              return rt
-            end
+            collect_return_types_nid(ibody, types)
           end
+        end
+        k = k + 1
+      end
+      return
+    end
+  end
+
+  def unify_return_type(types)
+    result = ""
+    has_nil = 0
+    k = 0
+    while k < types.length
+      t = types[k]
+      if t == "nil" || t == "void"
+        has_nil = 1
+      else
+        if result == ""
+          result = t
+        elsif base_type(result) == base_type(t)
+          # Same base type — prefer nullable version
+          if is_nullable_type(t) == 1
+            result = t
+          end
+        elsif result == "int"
+          # int is default/unresolved — real type takes priority
+          result = t
+        elsif t == "int"
+          # int is default/unresolved — keep existing result
+        else
+          # Genuinely different types
+          return "poly"
+        end
+      end
+      k = k + 1
+    end
+    if result == ""
+      if has_nil == 1
+        return "nil"
+      end
+      return "void"
+    end
+    if has_nil == 1
+      if is_nullable_pointer_type(result) == 1
+        if is_nullable_type(result) == 0
+          result = result + "?"
         end
       end
     end
-    ""
+    result
   end
 
   def fix_lambda_return_types
@@ -13837,9 +13881,17 @@ class Compiler
     if args_id >= 0
       arg_ids = get_args(args_id)
       if arg_ids.length > 0
+        rt = infer_type(arg_ids[0])
+        # return nil in a nullable pointer method → return NULL
+        if rt == "nil" && is_nullable_pointer_type(@current_method_return) == 1
+          if @in_gc_scope == 1
+            emit("  SP_GC_RESTORE();")
+          end
+          emit("  return NULL;")
+          return
+        end
         if @in_gc_scope == 1
           # Save return value, restore GC, then return
-          rt = infer_type(arg_ids[0])
           tmp = new_temp
           emit("  " + c_type(rt) + " " + tmp + " = " + compile_expr(arg_ids[0]) + ";")
           emit("  SP_GC_RESTORE();")
@@ -13850,10 +13902,15 @@ class Compiler
         return
       end
     end
+    # bare return — use NULL for nullable pointer types, 0 otherwise
     if @in_gc_scope == 1
       emit("  SP_GC_RESTORE();")
     end
-    emit("  return 0;")
+    if is_nullable_pointer_type(@current_method_return) == 1
+      emit("  return NULL;")
+    else
+      emit("  return 0;")
+    end
   end
 
 
@@ -16980,7 +17037,15 @@ class Compiler
     lt = @nd_type[last]
     if lt == "CallNode"
       lm = @nd_name[last]
-      if lm == "[]=" || lm == "push" || lm == "pop" || lm == "emit" || lm == "emit_raw"
+      if lm == "[]=" || lm == "push" || lm == "pop" || lm == "emit" || lm == "emit_raw" || lm == "puts" || lm == "print" || lm == "p" || lm == "printf" || lm == "warn" || lm == "raise" || lm == "exit" || lm == "delete" || lm == "clear" || lm == "reverse!" || lm == "sort!" || lm == "each" || lm == "times" || lm == "upto" || lm == "downto"
+        compile_stmt(last)
+        if return_type != "void"
+          emit("  return " + c_return_default(return_type) + ";")
+        end
+        return
+      end
+      # Receiver-based setter calls (obj.attr = val)
+      if lm.end_with?("=") && lm != "==" && lm != "!=" && lm != "<=" && lm != ">="
         compile_stmt(last)
         if return_type != "void"
           emit("  return " + c_return_default(return_type) + ";")
