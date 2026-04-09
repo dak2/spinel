@@ -8958,9 +8958,9 @@ class Compiler
         end
       end
     end
-    # Detect object array push: arr.push(ClassName.new(...))
+    # Detect array element type from push/<<: arr.push(x) or arr << x
     if @nd_type[nid] == "CallNode"
-      if @nd_name[nid] == "push"
+      if @nd_name[nid] == "push" || @nd_name[nid] == "<<"
         recv = @nd_receiver[nid]
         if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
           arr_name = @nd_name[recv]
@@ -14139,6 +14139,33 @@ class Compiler
             emit("  " + self_arrow + sanitize_ivar(@nd_name[recv]) + " = sp_str_concat(self->" + sanitize_ivar(@nd_name[recv]) + ", " + val + ");")
             return 1
           end
+        end
+      end
+    end
+
+    # << on array (same as push)
+    if mname == "<<"
+      if recv >= 0
+        rt = infer_type(recv)
+        if rt == "int_array"
+          rc = compile_expr(recv)
+          emit("  sp_IntArray_push(" + rc + ", " + compile_arg0(nid) + ");")
+          return 1
+        end
+        if rt == "str_array"
+          rc = compile_expr(recv)
+          emit("  sp_StrArray_push(" + rc + ", " + compile_arg0(nid) + ");")
+          return 1
+        end
+        if rt == "float_array"
+          rc = compile_expr(recv)
+          emit("  sp_FloatArray_push(" + rc + ", " + compile_arg0(nid) + ");")
+          return 1
+        end
+        if is_ptr_array_type(rt) == 1
+          rc = compile_expr(recv)
+          emit("  sp_PtrArray_push(" + rc + ", " + compile_arg0(nid) + ");")
+          return 1
         end
       end
     end
