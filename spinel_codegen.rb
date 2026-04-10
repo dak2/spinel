@@ -1614,7 +1614,7 @@ class Compiler
       end
       return "int"
     end
-    if mname == "**"
+    if mname == "**" || mname == "pow"
       if recv >= 0
         lt = infer_type(recv)
         if lt == "float"
@@ -11199,7 +11199,7 @@ class Compiler
       if mname == "%"
         return "sp_bigint_mod(" + rc + ", " + arg + ")"
       end
-      if mname == "**"
+      if mname == "**" || mname == "pow"
         return "sp_bigint_pow(" + rc + ", " + compile_arg0(nid) + ")"
       end
       if mname == ">"
@@ -11222,7 +11222,7 @@ class Compiler
       end
     end
     # Operators
-    if mname == "**"
+    if mname == "**" || mname == "pow"
       lt = infer_type(recv)
       if lt == "int"
         return "((mrb_int)pow((double)" + compile_expr(recv) + ", (double)" + compile_arg0(nid) + "))"
