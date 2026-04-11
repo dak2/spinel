@@ -1488,6 +1488,9 @@ class Compiler
     if mname == "swapcase"
       return "string"
     end
+    if mname == "delete_prefix" || mname == "delete_suffix"
+      return "string"
+    end
     if mname == "strip"
       return "string"
     end
@@ -11733,6 +11736,12 @@ class Compiler
     end
     if mname == "swapcase"
       return "sp_str_swapcase(" + rc + ")"
+    end
+    if mname == "delete_prefix"
+      return "sp_str_delete_prefix(" + rc + ", " + compile_arg0(nid) + ")"
+    end
+    if mname == "delete_suffix"
+      return "sp_str_delete_suffix(" + rc + ", " + compile_arg0(nid) + ")"
     end
     if mname == "strip"
       return "sp_str_strip(" + rc + ")"
