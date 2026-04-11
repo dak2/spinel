@@ -1700,6 +1700,24 @@ class Compiler
     if mname == "index" || mname == "find_index" || mname == "rindex"
       return "int"
     end
+    if mname == "delete_at"
+      if recv >= 0
+        rt = infer_type(recv)
+        if rt == "str_array"
+          return "string"
+        end
+        if rt == "float_array"
+          return "float"
+        end
+      end
+      return "int"
+    end
+    if mname == "insert"
+      if recv >= 0
+        return infer_type(recv)
+      end
+      return "int_array"
+    end
     if mname == "keys"
       return "str_array"
     end
@@ -12149,6 +12167,18 @@ class Compiler
           return "sp_IntArray_rindex(" + rc + ", " + compile_arg0(nid) + ")"
         end
       end
+      if mname == "delete_at"
+        return "sp_IntArray_delete_at(" + rc + ", " + compile_arg0(nid) + ")"
+      end
+      if mname == "insert"
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length >= 2
+            return "(sp_IntArray_insert(" + rc + ", " + compile_expr(aargs[0]) + ", " + compile_expr(aargs[1]) + "), " + rc + ")"
+          end
+        end
+      end
       if mname == "sort"
         return "sp_IntArray_sort(" + rc + ")"
       end
@@ -12382,6 +12412,18 @@ class Compiler
       if mname == "rindex"
         if @nd_arguments[nid] >= 0
           return "sp_StrArray_rindex(" + rc + ", " + compile_arg0(nid) + ")"
+        end
+      end
+      if mname == "delete_at"
+        return "sp_StrArray_delete_at(" + rc + ", " + compile_arg0(nid) + ")"
+      end
+      if mname == "insert"
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length >= 2
+            return "(sp_StrArray_insert(" + rc + ", " + compile_expr(aargs[0]) + ", " + compile_expr(aargs[1]) + "), " + rc + ")"
+          end
         end
       end
       if mname == "count"
@@ -17897,7 +17939,7 @@ class Compiler
     lt = @nd_type[last]
     if lt == "CallNode"
       lm = @nd_name[last]
-      if lm == "[]=" || lm == "push" || lm == "pop" || lm == "emit" || lm == "emit_raw" || lm == "puts" || lm == "print" || lm == "p" || lm == "printf" || lm == "warn" || lm == "raise" || lm == "exit" || lm == "sleep" || lm == "delete" || lm == "clear" || lm == "concat" || lm == "prepend" || lm == "fill" || lm == "reverse!" || lm == "sort!" || lm == "each" || lm == "times" || lm == "upto" || lm == "downto"
+      if lm == "[]=" || lm == "push" || lm == "pop" || lm == "emit" || lm == "emit_raw" || lm == "puts" || lm == "print" || lm == "p" || lm == "printf" || lm == "warn" || lm == "raise" || lm == "exit" || lm == "sleep" || lm == "delete" || lm == "clear" || lm == "concat" || lm == "prepend" || lm == "fill" || lm == "insert" || lm == "reverse!" || lm == "sort!" || lm == "each" || lm == "times" || lm == "upto" || lm == "downto"
         compile_stmt(last)
         if return_type != "void"
           emit("  return " + c_return_default(return_type) + ";")
