@@ -1090,6 +1090,23 @@ class Compiler
         end
         return "poly_array"
       end
+      # Check if all elements are the same array type → array of arrays
+      if et == "int_array" || et == "str_array" || et == "float_array"
+        all_same = 1
+        k = 1
+        while k < elems.length
+          if infer_type(elems[k]) != et
+            all_same = 0
+          end
+          k = k + 1
+        end
+        if all_same == 1
+          @needs_ptr_array = 1
+          @needs_gc = 1
+          return et + "_ptr_array"
+        end
+        return "poly_array"
+      end
       # Check if elements have mixed types
       k = 1
       while k < elems.length
@@ -2545,6 +2562,9 @@ class Compiler
       return 1
     end
     if bt == "stringio" || bt == "lambda" || bt == "poly_array"
+      return 1
+    end
+    if is_ptr_array_type(bt) == 1
       return 1
     end
     if bt == "fiber" || bt == "bigint"
