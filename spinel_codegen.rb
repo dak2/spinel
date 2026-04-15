@@ -1169,9 +1169,27 @@ class Compiler
           end
           k = k + 1
         end
+        # Detect all-symbol keys → sym_int_hash variant for int-valued
+        # hashes. (sym_str_hash etc. not yet implemented; they fall
+        # through to str_str_hash with sym_to_s wrapping at hash sites.)
+        all_sym_keys = 1
+        kk = 0
+        while kk < elems.length
+          ekid = elems[kk]
+          if @nd_type[ekid] == "AssocNode"
+            kid = @nd_key[ekid]
+            if kid < 0 || @nd_type[kid] != "SymbolNode"
+              all_sym_keys = 0
+            end
+          end
+          kk = kk + 1
+        end
         if all_same == 1
           if first_vt == "string"
             return "str_str_hash"
+          end
+          if all_sym_keys == 1 && (first_vt == "int" || first_vt == "bool" || first_vt == "nil")
+            return "sym_int_hash"
           end
         else
           # Mixed value types - store as str_str_hash with auto-conversion
@@ -5997,6 +6015,8 @@ class Compiler
       ht = infer_hash_val_type(nid)
       if ht == "str_str_hash"
         @needs_str_str_hash = 1
+      elsif ht == "sym_int_hash"
+        @needs_sym_int_hash = 1
       else
         @needs_str_int_hash = 1
       end
@@ -13438,6 +13458,35 @@ class Compiler
 
   def compile_hash_method_expr(nid, mname, rc, recv_type)
     # Hash methods
+    if recv_type == "sym_int_hash"
+      if mname == "[]"
+        return "sp_SymIntHash_get(" + rc + ", " + compile_arg0(nid) + ")"
+      end
+      if mname == "has_key?" || mname == "key?" || mname == "include?" || mname == "member?"
+        return "sp_SymIntHash_has_key(" + rc + ", " + compile_arg0(nid) + ")"
+      end
+      if mname == "length" || mname == "size" || (mname == "count" && @nd_block[nid] < 0 && @nd_arguments[nid] < 0)
+        return "sp_SymIntHash_length(" + rc + ")"
+      end
+      if mname == "empty?"
+        return "(sp_SymIntHash_length(" + rc + ") == 0)"
+      end
+      if mname == "any?" && @nd_block[nid] < 0
+        return "(sp_SymIntHash_length(" + rc + ") > 0)"
+      end
+      if mname == "fetch"
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          key = compile_expr(aargs[0])
+          if aargs.length >= 2
+            defval = compile_expr(aargs[1])
+            return "(sp_SymIntHash_has_key(" + rc + ", " + key + ") ? sp_SymIntHash_get(" + rc + ", " + key + ") : " + defval + ")"
+          end
+          return "sp_SymIntHash_get(" + rc + ", " + key + ")"
+        end
+      end
+    end
     if recv_type == "str_int_hash"
       if mname == "[]"
         return "sp_StrIntHash_get(" + rc + ", " + compile_str_arg0(nid) + ")"
@@ -14738,6 +14787,17 @@ class Compiler
       }
       return tmp
     end
+    if ht == "sym_int_hash"
+      @needs_sym_int_hash = 1
+      tmp = new_temp
+      emit("  sp_SymIntHash *" + tmp + " = sp_SymIntHash_new();")
+      elems.each { |el|
+        if @nd_type[el] == "AssocNode"
+          emit("  sp_SymIntHash_set(" + tmp + ", " + compile_expr(@nd_key[el]) + ", " + compile_expr(@nd_expression[el]) + ");")
+        end
+      }
+      return tmp
+    end
     @needs_str_int_hash = 1
     tmp = new_temp
     emit("  sp_StrIntHash *" + tmp + " = sp_StrIntHash_new();")
@@ -15671,8 +15731,12 @@ class Compiler
           aargs = get_args(args_id)
           if aargs.length >= 2
             rc = compile_expr(recv)
-            key = compile_expr_as_string(aargs[0])
             val = compile_expr(aargs[1])
+            if rt == "sym_int_hash"
+              emit("  sp_SymIntHash_set(" + rc + ", " + compile_expr(aargs[0]) + ", " + val + ");")
+              return 1
+            end
+            key = compile_expr_as_string(aargs[0])
             if rt == "str_int_hash"
               emit("  sp_StrIntHash_set(" + rc + ", " + key + ", " + val + ");")
               return 1
@@ -15691,6 +15755,10 @@ class Compiler
       if recv >= 0
         rt = infer_type(recv)
         rc = compile_expr(recv)
+        if rt == "sym_int_hash"
+          emit("  sp_SymIntHash_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          return 1
+        end
         if rt == "str_int_hash"
           emit("  sp_StrIntHash_delete(" + rc + ", " + compile_str_arg0(nid) + ");")
           return 1
@@ -17409,6 +17477,10 @@ class Compiler
     end
     if arg_ids.length >= 2
       val = compile_expr(arg_ids[1])
+    end
+    if rt == "sym_int_hash"
+      emit("  sp_SymIntHash_set(" + rc + ", " + idx + ", " + val + ");")
+      return
     end
     if rt == "int_array"
       # Check if value is an object pointer - needs cast
