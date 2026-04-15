@@ -827,7 +827,7 @@ class Compiler
       return "string"
     end
     if t == "SymbolNode"
-      return "string"
+      return "symbol"
     end
     if t == "NumberedReferenceReadNode"
       return "string"
@@ -2813,6 +2813,9 @@ class Compiler
     if t == "string"
       return "const char *"
     end
+    if t == "symbol"
+      return "sp_sym"
+    end
     if t == "mutable_str"
       return "sp_String *"
     end
@@ -2894,6 +2897,9 @@ class Compiler
     end
     if t == "string"
       return "(\"\\xff\" + 1)"
+    end
+    if t == "symbol"
+      return "((sp_sym)-1)"
     end
     if t == "mutable_str"
       return "NULL"
@@ -7543,17 +7549,16 @@ class Compiler
     @sym_names = local
   end
 
-  # Symbol type Phase 2, Step 1: emit the intern table and helpers.
-  # Generated code does not yet reference these (SymbolNode still compiles
-  # as a string literal). This lays the groundwork for Step 2.
+  # Symbol type Phase 2, Step 2: emit the intern table and helpers.
+  # SymbolNode now compiles to sp_sym values that index into sp_sym_names.
   def emit_sym_runtime
-    emit_raw("/* sp_sym intern table (Phase 2 Step 1: unused) */")
+    emit_raw("/* sp_sym intern table */")
     emit_raw("typedef mrb_int sp_sym;")
     emit_raw("#define SP_SYM_COUNT " + @sym_names.length.to_s)
     if @sym_names.length == 0
       emit_raw("static const char *const sp_sym_names[1] __attribute__((unused)) = {0};")
     else
-      line = "static const char *const sp_sym_names[" + @sym_names.length.to_s + "] __attribute__((unused)) = {"
+      line = "static const char *const sp_sym_names[" + @sym_names.length.to_s + "] = {"
       i = 0
       while i < @sym_names.length
         if i > 0
@@ -7579,6 +7584,45 @@ class Compiler
       i = i + 1
     end
     emit_raw("")
+  end
+
+  # Index of symbol name in @sym_names, or -1 if not found.
+  def sym_name_index(name)
+    i = 0
+    while i < @sym_names.length
+      if @sym_names[i] == name
+        return i
+      end
+      i = i + 1
+    end
+    -1
+  end
+
+  # Compile an expression in a string-context. Wraps with sp_sym_to_s
+  # when the expression has type "symbol", otherwise returns the raw
+  # expression. Used at boundaries where Symbol values flow into APIs
+  # that still expect const char * (catch/throw tag, hash key, etc.).
+  def compile_expr_as_string(nid)
+    s = compile_expr(nid)
+    if infer_type(nid) == "symbol"
+      return "sp_sym_to_s(" + s + ")"
+    end
+    s
+  end
+
+  # Compile a symbol literal (by name) to a sp_sym C expression.
+  # Prefers SPS_<name> for valid-C-identifier names, otherwise emits
+  # the raw integer cast.
+  def compile_symbol_literal(name)
+    idx = sym_name_index(name)
+    if idx < 0
+      # Should not happen — collect_sym_names has already run.
+      return "sp_sym_intern(" + c_string_literal(name) + ")"
+    end
+    if sym_is_c_ident(name) == 1
+      return "SPS_" + name
+    end
+    "((sp_sym)" + idx.to_s + ")"
   end
 
   # True (1) iff s is a non-empty valid C identifier: [A-Za-z_][A-Za-z0-9_]*
@@ -10233,7 +10277,7 @@ class Compiler
       return c_string_literal(@nd_content[nid])
     end
     if t == "SymbolNode"
-      return c_string_literal(@nd_content[nid])
+      return compile_symbol_literal(@nd_content[nid])
     end
     if t == "InterpolatedStringNode"
       return compile_interpolated(nid)
@@ -10737,6 +10781,19 @@ class Compiler
       arg_ids = get_args(args_id)
       if arg_ids.length > 0
         return compile_expr(arg_ids[0])
+      end
+    end
+    "0"
+  end
+
+  # Like compile_arg0, but converts symbol-typed arg to const char *
+  # (sp_sym_to_s wrap). Use for callsites that need a string key.
+  def compile_str_arg0(nid)
+    args_id = @nd_arguments[nid]
+    if args_id >= 0
+      arg_ids = get_args(args_id)
+      if arg_ids.length > 0
+        return compile_expr_as_string(arg_ids[0])
       end
     end
     "0"
@@ -13352,10 +13409,10 @@ class Compiler
     # Hash methods
     if recv_type == "str_int_hash"
       if mname == "[]"
-        return "sp_StrIntHash_get(" + rc + ", " + compile_arg0(nid) + ")"
+        return "sp_StrIntHash_get(" + rc + ", " + compile_str_arg0(nid) + ")"
       end
       if mname == "has_key?" || mname == "key?" || mname == "include?" || mname == "member?"
-        return "sp_StrIntHash_has_key(" + rc + ", " + compile_arg0(nid) + ")"
+        return "sp_StrIntHash_has_key(" + rc + ", " + compile_str_arg0(nid) + ")"
       end
       if mname == "length" || mname == "size" || (mname == "count" && @nd_block[nid] < 0 && @nd_arguments[nid] < 0)
         return "sp_StrIntHash_length(" + rc + ")"
@@ -13382,7 +13439,7 @@ class Compiler
         args_id = @nd_arguments[nid]
         if args_id >= 0
           aargs = get_args(args_id)
-          key = compile_expr(aargs[0])
+          key = compile_expr_as_string(aargs[0])
           if aargs.length >= 2
             defval = compile_expr(aargs[1])
             return "(sp_StrIntHash_has_key(" + rc + ", " + key + ") ? sp_StrIntHash_get(" + rc + ", " + key + ") : " + defval + ")"
@@ -13438,10 +13495,10 @@ class Compiler
     end
     if recv_type == "str_str_hash"
       if mname == "[]"
-        return "sp_StrStrHash_get(" + rc + ", " + compile_arg0(nid) + ")"
+        return "sp_StrStrHash_get(" + rc + ", " + compile_str_arg0(nid) + ")"
       end
       if mname == "has_key?" || mname == "key?" || mname == "include?" || mname == "member?"
-        return "sp_StrStrHash_has_key(" + rc + ", " + compile_arg0(nid) + ")"
+        return "sp_StrStrHash_has_key(" + rc + ", " + compile_str_arg0(nid) + ")"
       end
       if mname == "length" || mname == "size" || (mname == "count" && @nd_block[nid] < 0 && @nd_arguments[nid] < 0)
         return "sp_StrStrHash_length(" + rc + ")"
@@ -13488,7 +13545,7 @@ class Compiler
         args_id = @nd_arguments[nid]
         if args_id >= 0
           aargs = get_args(args_id)
-          key = compile_expr(aargs[0])
+          key = compile_expr_as_string(aargs[0])
           if aargs.length >= 2
             defval = compile_expr(aargs[1])
             return "(sp_StrStrHash_has_key(" + rc + ", " + key + ") ? sp_StrStrHash_get(" + rc + ", " + key + ") : " + defval + ")"
@@ -14645,7 +14702,7 @@ class Compiler
               end
             end
           end
-          emit("  sp_StrStrHash_set(" + tmp + ", " + compile_expr(@nd_key[el]) + ", " + val + ");")
+          emit("  sp_StrStrHash_set(" + tmp + ", " + compile_expr_as_string(@nd_key[el]) + ", " + val + ");")
         end
       }
       return tmp
@@ -14655,7 +14712,7 @@ class Compiler
     emit("  sp_StrIntHash *" + tmp + " = sp_StrIntHash_new();")
     elems.each { |el|
       if @nd_type[el] == "AssocNode"
-        emit("  sp_StrIntHash_set(" + tmp + ", " + compile_expr(@nd_key[el]) + ", " + compile_expr(@nd_expression[el]) + ");")
+        emit("  sp_StrIntHash_set(" + tmp + ", " + compile_expr_as_string(@nd_key[el]) + ", " + compile_expr(@nd_expression[el]) + ");")
       end
     }
     tmp
@@ -15583,7 +15640,7 @@ class Compiler
           aargs = get_args(args_id)
           if aargs.length >= 2
             rc = compile_expr(recv)
-            key = compile_expr(aargs[0])
+            key = compile_expr_as_string(aargs[0])
             val = compile_expr(aargs[1])
             if rt == "str_int_hash"
               emit("  sp_StrIntHash_set(" + rc + ", " + key + ", " + val + ");")
@@ -15604,11 +15661,11 @@ class Compiler
         rt = infer_type(recv)
         rc = compile_expr(recv)
         if rt == "str_int_hash"
-          emit("  sp_StrIntHash_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          emit("  sp_StrIntHash_delete(" + rc + ", " + compile_str_arg0(nid) + ");")
           return 1
         end
         if rt == "str_str_hash"
-          emit("  sp_StrStrHash_delete(" + rc + ", " + compile_arg0(nid) + ");")
+          emit("  sp_StrStrHash_delete(" + rc + ", " + compile_str_arg0(nid) + ");")
           return 1
         end
         if rt == "int_array"
@@ -17313,7 +17370,11 @@ class Compiler
     idx = "0"
     val = "0"
     if arg_ids.length >= 1
-      idx = compile_expr(arg_ids[0])
+      if rt == "str_int_hash" || rt == "str_str_hash"
+        idx = compile_expr_as_string(arg_ids[0])
+      else
+        idx = compile_expr(arg_ids[0])
+      end
     end
     if arg_ids.length >= 2
       val = compile_expr(arg_ids[1])
@@ -17378,6 +17439,11 @@ class Compiler
       end
       if at == "bigint"
         emit("  { const char *_bs = sp_bigint_to_s(" + val + "); fputs(_bs, stdout); putchar('" + bsl_n + "'); }")
+        k = k + 1
+        next
+      end
+      if at == "symbol"
+        emit("  puts(sp_sym_to_s(" + val + "));")
         k = k + 1
         next
       end
@@ -17465,6 +17531,11 @@ class Compiler
       val = compile_expr(aid)
       if at == "bigint"
         emit("  fputs(sp_bigint_to_s(" + val + "), stdout);")
+        k = k + 1
+        next
+      end
+      if at == "symbol"
+        emit("  fputs(sp_sym_to_s(" + val + "), stdout);")
         k = k + 1
         next
       end
@@ -18568,7 +18639,7 @@ class Compiler
 
   def compile_catch_expr(nid)
     @needs_setjmp = 1
-    tag = compile_arg0(nid)
+    tag = compile_str_arg0(nid)
     blk = @nd_block[nid]
     tmp = new_temp
 
@@ -18605,7 +18676,7 @@ class Compiler
   def compile_catch_stmt(nid)
     @needs_setjmp = 1
     # catch(:tag) do ... end
-    tag = compile_arg0(nid)
+    tag = compile_str_arg0(nid)
     blk = @nd_block[nid]
     emit("  sp_catch_tag[sp_catch_top] = " + tag + ";")
     emit("  sp_catch_top++;")
@@ -18631,7 +18702,7 @@ class Compiler
     tag = "\"\""
     val = "0"
     if arg_ids.length >= 1
-      tag = compile_expr(arg_ids[0])
+      tag = compile_expr_as_string(arg_ids[0])
     end
     if arg_ids.length >= 2
       val = compile_expr(arg_ids[1])
