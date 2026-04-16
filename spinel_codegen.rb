@@ -7643,10 +7643,25 @@ class Compiler
     local = "".split(",")
     i = 0
     while i < @nd_type.length
-      if @nd_type[i] == "SymbolNode"
+      t = @nd_type[i]
+      if t == "SymbolNode"
         sname = @nd_content[i]
         if not_in(sname, local) == 1
           local.push(sname)
+        end
+      end
+      # Also collect "literal".to_sym / .intern receivers so the
+      # static-intern optimization can resolve them to SPS_ constants.
+      if t == "CallNode"
+        mn = @nd_name[i]
+        if mn == "to_sym" || mn == "intern"
+          r = @nd_receiver[i]
+          if r >= 0 && @nd_type[r] == "StringNode"
+            lname = @nd_content[r]
+            if not_in(lname, local) == 1
+              local.push(lname)
+            end
+          end
         end
       end
       i = i + 1
@@ -11457,6 +11472,19 @@ class Compiler
       end
     end
 
+    # Static intern optimization: "literal".to_sym / .intern where the
+    # string content is already in @sym_names becomes a compile-time
+    # constant (SPS_<name> or ((sp_sym)<idx>)), avoiding the runtime
+    # sp_sym_intern strcmp loop and dynamic pool allocation.
+    if recv_type == "string" && (mname == "to_sym" || mname == "intern")
+      if recv >= 0 && @nd_type[recv] == "StringNode"
+        sname = @nd_content[recv]
+        if sym_name_index(sname) >= 0
+          return compile_symbol_literal(sname)
+        end
+      end
+    end
+
     # String methods
     if recv_type == "string"
       r = compile_string_method_expr(nid, mname, rc)
@@ -13617,9 +13645,23 @@ class Compiler
     # Hash methods
     if recv_type == "sym_int_hash"
       if mname == "[]"
+        args_id0 = @nd_arguments[nid]
+        if args_id0 >= 0
+          aa0 = get_args(args_id0)
+          if aa0.length > 0 && infer_type(aa0[0]) != "symbol"
+            return "((mrb_int)0)"
+          end
+        end
         return "sp_SymIntHash_get(" + rc + ", " + compile_arg0(nid) + ")"
       end
       if mname == "has_key?" || mname == "key?" || mname == "include?" || mname == "member?"
+        args_id1 = @nd_arguments[nid]
+        if args_id1 >= 0
+          aa1 = get_args(args_id1)
+          if aa1.length > 0 && infer_type(aa1[0]) != "symbol"
+            return "FALSE"
+          end
+        end
         return "sp_SymIntHash_has_key(" + rc + ", " + compile_arg0(nid) + ")"
       end
       if mname == "length" || mname == "size" || (mname == "count" && @nd_block[nid] < 0 && @nd_arguments[nid] < 0)
@@ -13646,9 +13688,23 @@ class Compiler
     end
     if recv_type == "sym_str_hash"
       if mname == "[]"
+        args_id0s = @nd_arguments[nid]
+        if args_id0s >= 0
+          aa0s = get_args(args_id0s)
+          if aa0s.length > 0 && infer_type(aa0s[0]) != "symbol"
+            return "(\"\\xff\" + 1)"
+          end
+        end
         return "sp_SymStrHash_get(" + rc + ", " + compile_arg0(nid) + ")"
       end
       if mname == "has_key?" || mname == "key?" || mname == "include?" || mname == "member?"
+        args_id1s = @nd_arguments[nid]
+        if args_id1s >= 0
+          aa1s = get_args(args_id1s)
+          if aa1s.length > 0 && infer_type(aa1s[0]) != "symbol"
+            return "FALSE"
+          end
+        end
         return "sp_SymStrHash_has_key(" + rc + ", " + compile_arg0(nid) + ")"
       end
       if mname == "length" || mname == "size" || (mname == "count" && @nd_block[nid] < 0 && @nd_arguments[nid] < 0)
@@ -14383,6 +14439,22 @@ class Compiler
     rc = "0"
     if arg_id >= 0
       rc = compile_expr(arg_id)
+    end
+    # Symbol equality: distinct from all non-symbol types in Ruby.
+    if lt == "symbol"
+      if at == "symbol"
+        if op == "=="
+          return "(" + lc + " == " + rc + ")"
+        else
+          return "(" + lc + " != " + rc + ")"
+        end
+      end
+      # sym vs non-sym: always unequal in Ruby
+      return op == "==" ? "FALSE" : "TRUE"
+    end
+    if at == "symbol"
+      # non-sym lhs vs sym rhs: also always unequal
+      return op == "==" ? "FALSE" : "TRUE"
     end
     if lt == "string"
       if at == "nil"
