@@ -10,6 +10,10 @@
 
 CC       ?= cc
 CFLAGS   = -O2 -Wno-all
+# Per-function sections allow the linker to strip unused bigint/regexp
+# functions from the final binary (supported since GCC 2.7 / binutils 2.17).
+SEC_FLAGS = -ffunction-sections -fdata-sections
+GC_FLAGS  = -Wl,--gc-sections
 
 # Prism library (auto-detect from gem, or set PRISM_DIR manually)
 PRISM_DIR ?= $(shell ruby -rprism -e 'puts $$LOADED_FEATURES.grep(/prism/).first.sub(%r{/lib/.*}, "")' 2>/dev/null)
@@ -51,11 +55,11 @@ RE_OBJ = $(patsubst lib/regexp/%.c,build/regexp/%.o,$(RE_SRC))
 
 build/regexp/%.o: lib/regexp/%.c lib/regexp/re_internal.h
 	@mkdir -p build/regexp
-	$(CC) -c -O2 -Ilib/regexp $< -o $@
+	$(CC) -c -O2 $(SEC_FLAGS) -Ilib/regexp $< -o $@
 
 build/sp_bigint.o: lib/sp_bigint.c lib/sp_bigint.h lib/mruby_shim.h
 	@mkdir -p build
-	$(CC) -c -O2 -Wno-all -Ilib lib/sp_bigint.c -o build/sp_bigint.o
+	$(CC) -c -O2 -Wno-all $(SEC_FLAGS) -Ilib lib/sp_bigint.c -o build/sp_bigint.o
 
 SP_RT_LIB = lib/libspinel_rt.a
 
@@ -91,7 +95,7 @@ test: spinel_parse $(SP_RT_LIB)
 	  bn=$$(basename "$$f" .rb); \
 	  ./spinel_parse "$$f" /tmp/_sp_t.ast 2>/dev/null && \
 	  ./spinel_codegen /tmp/_sp_t.ast /tmp/_sp_t.c 2>/dev/null && \
-	  $(CC) $(CFLAGS) -Ilib /tmp/_sp_t.c $(SP_RT_LIB) -lm -o /tmp/_sp_t_bin 2>/dev/null; \
+	  $(CC) $(CFLAGS) $(SEC_FLAGS) -Ilib /tmp/_sp_t.c $(SP_RT_LIB) -lm $(GC_FLAGS) -o /tmp/_sp_t_bin 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
 	    expected=$$(timeout 10 ruby "$$f" 2>/dev/null); \
 	    actual=$$(timeout 10 /tmp/_sp_t_bin 2>/dev/null); \
@@ -114,7 +118,7 @@ bench: spinel_parse $(SP_RT_LIB)
 	  bn=$$(basename "$$f" .rb); \
 	  timeout 10 ./spinel_parse "$$f" /tmp/_sp_b.ast 2>/dev/null && \
 	  timeout 10 ./spinel_codegen /tmp/_sp_b.ast /tmp/_sp_b.c 2>/dev/null && \
-	  $(CC) $(CFLAGS) -Ilib /tmp/_sp_b.c $(SP_RT_LIB) -lm -o /tmp/_sp_b_bin 2>/dev/null; \
+	  $(CC) $(CFLAGS) $(SEC_FLAGS) -Ilib /tmp/_sp_b.c $(SP_RT_LIB) -lm $(GC_FLAGS) -o /tmp/_sp_b_bin 2>/dev/null; \
 	  if [ $$? -eq 0 ]; then \
 	    expected=$$(timeout 60 ruby "$$f" 2>/dev/null); \
 	    ruby_rc=$$?; \
