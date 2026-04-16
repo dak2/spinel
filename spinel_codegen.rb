@@ -7327,8 +7327,36 @@ class Compiler
     return 0
   end
 
-  # Check if multiplication x = a * b has unbounded growth (self-referential via assigns)
-  def mul_is_unbounded(lname, expr)
+  # Check if addition x = a + b has fibonacci-like growth (both operands
+  # are variables that reach x via the assignment chain). Rejects i = i + 1
+  # where one side is a constant.
+  def add_is_unbounded(lname, expr)
+    recv = @nd_receiver[expr]
+    left_reaches = 0
+    if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
+      if bi_reaches(lname, @nd_name[recv], 0) == 1
+        left_reaches = 1
+      end
+    end
+    right_reaches = 0
+    args_id = @nd_arguments[expr]
+    if args_id != nil && args_id >= 0
+      aargs = get_args(args_id)
+      if aargs.length > 0 && @nd_type[aargs[0]] == "LocalVariableReadNode"
+        if bi_reaches(lname, @nd_name[aargs[0]], 0) == 1
+          right_reaches = 1
+        end
+      end
+    end
+    # Both sides must be reachable (fibonacci: c = a + b, a ← b, b ← c)
+    if left_reaches == 1 && right_reaches == 1
+      return 1
+    end
+    0
+  end
+
+  # Check if binary op x = a OP b has unbounded growth (self-referential via assigns)
+  def op_is_unbounded(lname, expr)
     recv = @nd_receiver[expr]
     if recv >= 0 && @nd_type[recv] == "LocalVariableReadNode"
       op = @nd_name[recv]
@@ -7356,21 +7384,37 @@ class Compiler
     if @nd_type[nid] == "LocalVariableWriteNode"
       lname = @nd_name[nid]
       expr = @nd_expression[nid]
-      if expr >= 0 && @nd_type[expr] == "CallNode" && @nd_name[expr] == "*"
-        if mul_is_unbounded(lname, expr) == 1
-          if not_in(lname, bigint_names) == 1
-            bigint_names.push(lname)
+      if expr >= 0 && @nd_type[expr] == "CallNode"
+        op = @nd_name[expr]
+        if op == "*" || op == "**"
+          if op_is_unbounded(lname, expr) == 1
+            if not_in(lname, bigint_names) == 1
+              bigint_names.push(lname)
+            end
+          end
+        end
+        # For +, only promote when BOTH operands are variables that
+        # reach lname (fibonacci pattern: c = a + b where a,b grow).
+        # Reject i = i + 1 (constant RHS → linear, fits int64).
+        if op == "+"
+          if add_is_unbounded(lname, expr) == 1
+            if not_in(lname, bigint_names) == 1
+              bigint_names.push(lname)
+            end
           end
         end
       end
     end
     if @nd_type[nid] == "LocalVariableOperatorWriteNode"
-      if @nd_binop[nid] == "*"
+      bop = @nd_binop[nid]
+      if bop == "*" || bop == "**"
         lname = @nd_name[nid]
         if not_in(lname, bigint_names) == 1
           bigint_names.push(lname)
         end
       end
+      # += is only unbounded if self-referential with another growing var
+      # (not detected here since OpWriteNode is always x += expr)
     end
     if @nd_body[nid] >= 0
       scan_bigint_in_loop_node((@nd_body[nid]), bigint_names)
