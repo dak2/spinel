@@ -5378,29 +5378,17 @@ const char *sp_bigint_to_s(sp_Bigint *b) {
     snprintf(s, 24, "%lld", (long long)v);
     return s;
   }
-  /* Large number: use mpz_sizeinbase for allocation, repeated div/mod for digits */
-  size_t est = mpz_sizeinbase(z, 10) + 2;
-  char *buf = (char*)malloc(est + 1);
-  char *p = buf + est;
-  *p = 0;
-  mpz_t tmp, rem, ten;
-  mpz_init_set(sp_mpz_ctx, &tmp, z);
-  if (tmp.sn < 0) tmp.sn = 1;
-  mpz_init_set_int(sp_mpz_ctx, &ten, 10);
-  mpz_init(sp_mpz_ctx, &rem);
-  while (tmp.sz > 0 && !(tmp.sz == 1 && tmp.p[0] == 0)) {
-    mpz_mmod(sp_mpz_ctx, &rem, &tmp, &ten);
-    int digit = (rem.sz > 0) ? (int)(rem.p[0]) : 0;
-    *--p = '0' + digit;
-    mpz_mdiv(sp_mpz_ctx, &tmp, &tmp, &ten);
-  }
-  if (*p == 0) *--p = '0';
-  if (z->sn < 0) *--p = '-';
-  char *result = (char*)malloc(strlen(p) + 1);
-  strcpy(result, p);
-  mpz_clear(sp_mpz_ctx, &tmp);
-  mpz_clear(sp_mpz_ctx, &ten);
-  mpz_clear(sp_mpz_ctx, &rem);
+  /* Use mpz_get_str which dispatches to:
+   * - CPython-style base conversion for medium numbers
+   * - Divide-and-conquer (O(n log^2 n)) for large numbers
+   * Much faster than the naive repeated-div-by-10 loop. */
+  size_t est = mpz_sizeinbase(z, 10) + 4;
+  char *buf = (char*)malloc(est);
+  mpz_get_str(sp_mpz_ctx, buf, (mrb_int)est, 10, z);
+  /* mpz_get_str writes into buf; return a trimmed copy */
+  size_t len = strlen(buf);
+  char *result = (char*)malloc(len + 1);
+  memcpy(result, buf, len + 1);
   free(buf);
   return result;
 }
