@@ -152,6 +152,7 @@ install: all
 	install -m 644 spinel_parse.rb  $(SPNLDIR)/
 	install -m 644 spinel_codegen.rb $(SPNLDIR)/
 	install -m 644 lib/libspinel_rt.a $(SPNLDIR)/lib/
+	install -m 644 lib/sp_runtime.h   $(SPNLDIR)/lib/
 	install -d $(PREFIX)/bin
 	ln -sf $(SPNLDIR)/spinel $(PREFIX)/bin/spinel
 
