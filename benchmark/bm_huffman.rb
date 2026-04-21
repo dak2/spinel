@@ -56,8 +56,8 @@ while i < 256
 end
 i = 0
 while i < bytes.length
-  b = bytes[i]
-  freq[b] = freq[b] + 1
+  bv = bytes[i]
+  freq[bv] = freq[bv] + 1
   i = i + 1
 end
 
