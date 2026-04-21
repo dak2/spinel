@@ -9888,6 +9888,14 @@ class Compiler
               ltypes[k] = ltypes2[j]
               set_var_type(lnames[k], ltypes2[j])
             end
+          elsif ltypes[k] == "nil" && is_nullable_pointer_type(ltypes2[j]) == 1
+            # `prev = nil` then `prev = obj` — upgrade to obj?
+            if is_nullable_type(ltypes2[j]) == 1
+              ltypes[k] = ltypes2[j]
+            else
+              ltypes[k] = ltypes2[j] + "?"
+            end
+            set_var_type(lnames[k], ltypes[k])
           end
         end
         k = k + 1
