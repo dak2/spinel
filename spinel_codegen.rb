@@ -173,6 +173,15 @@ class Compiler
     @needs_regexp = 0
     @regexp_patterns = "".split(",")
     @regexp_flags = "".split(",")
+
+    # Cache for parse_id_list: AST list fields never change once loaded,
+    # so the parsed IntArray can be shared across callers. The `[[0]]`
+    # literal teaches Spinel that @parse_id_pool is ptr_array<int_array>;
+    # slot 0 is a reserved dummy. PtrArray now scans its elements, so
+    # cached IntArrays stay reachable.
+    @parse_id_cache = {}
+    @parse_id_pool = [[0]]
+
     @needs_stringio = 0
     @needs_proc = 0
     @proc_counter = 0
@@ -243,9 +252,15 @@ class Compiler
   # Parse comma-sep node IDs into IntArray. Manually walks bytes to avoid
   # allocating the intermediate StrArray + substrings that `String#split`
   # would produce — this is called ~100 K times during bootstrap.
+  # Results are cached by input string: AST fields are immutable once
+  # parsed, so the same IntArray can be shared across callers. Callers
+  # must treat the result as read-only.
   def parse_id_list(s)
     if s == ""
       return []
+    end
+    if @parse_id_cache.key?(s)
+      return @parse_id_pool[@parse_id_cache[s]]
     end
     result = []
     bs = s.bytes
@@ -263,6 +278,8 @@ class Compiler
       i = i + 1
     end
     result.push(num)
+    @parse_id_cache[s] = @parse_id_pool.length
+    @parse_id_pool.push(result)
     result
   end
 
