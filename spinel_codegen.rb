@@ -18708,11 +18708,22 @@ class Compiler
     end
     pop_scope
     @out_lines = save_out
-    # Build function body
+    # Hoist the proc body to file scope. Previously this was emitted as a
+    # GCC nested-function inside a statement-expression, which Apple clang
+    # does not implement. File-scope works for non-capturing procs (the
+    # only kind compile_proc_literal currently produces).
+    @lambda_funcs << "static mrb_int "
+    @lambda_funcs << fname
+    @lambda_funcs << "(mrb_int lv_"
+    @lambda_funcs << bp
+    @lambda_funcs << ") {\n"
     if body_stmts != ""
-      return "({ mrb_int " + fname + "(mrb_int lv_" + bp + ") { " + body_stmts.strip + " return " + bexpr + "; } sp_proc_new(" + fname + "); })"
+      @lambda_funcs << body_stmts
     end
-    return "({ mrb_int " + fname + "(mrb_int lv_" + bp + ") { return " + bexpr + "; } sp_proc_new(" + fname + "); })"
+    @lambda_funcs << "  return "
+    @lambda_funcs << bexpr
+    @lambda_funcs << ";\n}\n"
+    return "sp_proc_new(" + fname + ")"
   end
 
   def compile_bracket_assign(nid)
