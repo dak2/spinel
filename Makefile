@@ -10,6 +10,16 @@
 
 CC       ?= cc
 CFLAGS   = -O2 -Wno-all
+# Bootstrap-only flags: spinel_codegen runs on the developer's machine
+# only, so we can use -O3 -flto for ~5-10% extra wall-clock without
+# constraining users (whose generated C is built with plain CFLAGS).
+# Override with LTO=0 on toolchains without LTO support.
+LTO     ?= 1
+ifeq ($(LTO),1)
+  BOOTSTRAP_CFLAGS = -O3 -flto -Wno-all
+else
+  BOOTSTRAP_CFLAGS = $(CFLAGS)
+endif
 # Per-function sections allow the linker to strip unused bigint/regexp
 # functions from the final binary (supported since GCC 2.7 / binutils 2.17).
 SEC_FLAGS = -ffunction-sections -fdata-sections
@@ -125,10 +135,10 @@ spinel_codegen$(EXE): spinel_codegen.rb spinel_parse$(EXE)
 	./spinel_parse$(EXE) spinel_codegen.rb build/codegen.ast
 	@echo "=== Bootstrap Step 2: gen1 (CRuby) ==="
 	ruby spinel_codegen.rb build/codegen.ast build/gen1.c
-	$(CC) $(CFLAGS) -Ilib build/gen1.c $(LDFLAGS) -lm -o build/bin1$(EXE)
+	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/gen1.c $(LDFLAGS) -lm -o build/bin1$(EXE)
 	@echo "=== Bootstrap Step 3: gen2 (bin1) ==="
 	./build/bin1$(EXE) build/codegen.ast build/gen2.c
-	$(CC) $(CFLAGS) -Ilib build/gen2.c $(LDFLAGS) -lm -o build/bin2$(EXE)
+	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/gen2.c $(LDFLAGS) -lm -o build/bin2$(EXE)
 	@echo "=== Bootstrap Step 4: gen3 (bin2) - verify ==="
 	./build/bin2$(EXE) build/codegen.ast build/gen3.c
 	@diff build/gen2.c build/gen3.c > /dev/null && echo "gen2.c == gen3.c (bootstrap OK)" || (echo "BOOTSTRAP FAILED: gen2.c != gen3.c" && exit 1)
