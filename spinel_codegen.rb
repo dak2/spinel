@@ -19985,7 +19985,8 @@ class Compiler
       return
     end
     if at == "float"
-      emit("  printf(\"%g" + bsl_n + "\", " + val + ");")
+      @needs_string_helpers = 1
+      emit("  { const char *_fs = sp_float_to_s(" + val + "); fputs(_fs, stdout); putchar('" + bsl_n + "'); }")
       return
     end
     if at == "bool"
@@ -20040,7 +20041,8 @@ class Compiler
         emit("  printf(\"%lld" + bsl_n + "\", (long long)" + val + ");")
       else
         if at == "float"
-          emit("  printf(\"%g" + bsl_n + "\", " + val + ");")
+          @needs_string_helpers = 1
+          emit("  { const char *_fs = sp_float_to_s(" + val + "); fputs(_fs, stdout); putchar('" + bsl_n + "'); }")
         else
           if at == "string" || at == "string?"
             emit("  { const char *_ps = (const char *)(" + val + "); if (_ps) { fputs(_ps, stdout); if (!*_ps || _ps[strlen(_ps)-1] != '" + bsl_n + "') putchar('" + bsl_n + "'); } else putchar('" + bsl_n + "'); }")
@@ -20064,6 +20066,9 @@ class Compiler
                   emit("  { sp_IntArray *_pa = " + val + "; for (mrb_int _pi = 0; _pi < _pa->len; _pi++) puts(sp_sym_to_s((sp_sym)_pa->data[_pa->start + _pi])); }")
                 elsif at == "int_array"
                   emit("  { sp_IntArray *_pa = " + val + "; for (mrb_int _pi = 0; _pi < _pa->len; _pi++) printf(\"%lld" + bsl_n + "\", (long long)_pa->data[_pa->start + _pi]); }")
+                elsif at == "float_array"
+                  @needs_string_helpers = 1
+                  emit("  { sp_FloatArray *_pa = " + val + "; for (mrb_int _pi = 0; _pi < _pa->len; _pi++) { const char *_fs = sp_float_to_s(_pa->data[_pi]); fputs(_fs, stdout); putchar('" + bsl_n + "'); } }")
                 else
                   emit("  printf(\"%lld" + bsl_n + "\", (long long)" + val + ");")
                 end
