@@ -17675,6 +17675,14 @@ class Compiler
       end
       return
     end
+    # `recv[idx] OP= value`. Without this case, the IndexOperatorWriteNode
+    # the parser emits would fall through and the increment would be
+    # silently dropped — symptoms include matmul / += accumulators
+    # producing zero-valued output even though forward passes look fine.
+    if t == "IndexOperatorWriteNode"
+      compile_index_op_assign(nid)
+      return
+    end
     if t == "IfNode"
       compile_if_stmt(nid)
       return
@@ -20626,6 +20634,65 @@ class Compiler
     end
     if rt == "str_str_hash"
       emit("  sp_StrStrHash_set(" + rc + ", " + idx + ", " + val + ");")
+      return
+    end
+  end
+
+  # Compile `recv[idx] OP= value` (IndexOperatorWriteNode).
+  #
+  # Emitted as a get-modify-set against the appropriate typed container,
+  # in a block scope so that the receiver and index are each evaluated
+  # exactly once. Falls through silently for receiver types we don't
+  # handle yet — currently float_array, int_array, and the four numeric
+  # hash variants. Compound-assign on string arrays / poly hashes / str
+  # hashes is rarely useful and would need per-type semantics.
+  def compile_index_op_assign(nid)
+    recv = @nd_receiver[nid]
+    args_id = @nd_arguments[nid]
+    arg_ids = args_id >= 0 ? get_args(args_id) : []
+    return if arg_ids.length < 1
+    op = @nd_binop[nid]
+    rt = infer_type(recv)
+    rc = compile_expr_gc_rooted(recv)
+    idx = compile_expr(arg_ids[0])
+    val = compile_expr(@nd_expression[nid])
+
+    if rt == "float_array" || rt == "int_array"
+      pfx = array_c_prefix(rt)
+      tt  = new_temp
+      ti  = new_temp
+      emit("  { sp_" + pfx + " *" + tt + " = " + rc + "; mrb_int " + ti + " = " + idx +
+           "; sp_" + pfx + "_set(" + tt + ", " + ti +
+           ", sp_" + pfx + "_get(" + tt + ", " + ti + ") " + op + " (" + val + ")); }")
+      return
+    end
+    if rt == "str_int_hash"
+      tt = new_temp
+      ti = new_temp
+      idx_s = compile_expr_as_string(arg_ids[0])
+      emit("  { sp_StrIntHash *" + tt + " = " + rc + "; const char *" + ti + " = " + idx_s +
+           "; sp_StrIntHash_set(" + tt + ", " + ti +
+           ", sp_StrIntHash_get(" + tt + ", " + ti + ") " + op + " (" + val + ")); }")
+      return
+    end
+    if rt == "int_str_hash"
+      # Concatenating strings (`+= str`) is the only sensible op here.
+      if op == "+"
+        tt = new_temp
+        ti = new_temp
+        @needs_string_helpers = 1
+        emit("  { sp_IntStrHash *" + tt + " = " + rc + "; mrb_int " + ti + " = " + idx +
+             "; sp_IntStrHash_set(" + tt + ", " + ti +
+             ", sp_str_concat(sp_IntStrHash_get(" + tt + ", " + ti + "), " + val + ")); }")
+        return
+      end
+    end
+    if rt == "sym_int_hash"
+      tt = new_temp
+      ti = new_temp
+      emit("  { sp_SymIntHash *" + tt + " = " + rc + "; sp_sym " + ti + " = " + idx +
+           "; sp_SymIntHash_set(" + tt + ", " + ti +
+           ", sp_SymIntHash_get(" + tt + ", " + ti + ") " + op + " (" + val + ")); }")
       return
     end
   end
