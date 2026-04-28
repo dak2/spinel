@@ -21029,7 +21029,7 @@ class Compiler
     result = new_temp
     emit("  " + obj_ct + " " + result + " = " + obj_arg + ";")
     tmp_i = new_temp
-    if is_array_type(rt) == 1
+    if is_array_type(rt) == 1 || is_ptr_array_type(rt) == 1
       pfx = array_c_prefix(rt)
       emit("  {")
       @indent = @indent + 1
