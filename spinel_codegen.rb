@@ -13446,6 +13446,18 @@ class Compiler
         end
       end
     }
+    # Constant initializer expressions get compiled into main() right
+    # before the user statements run, but the block params they
+    # introduce (e.g. \`FRAME = [...].map { |n| ... }\`) need
+    # declarations in the same scope. Scan each const's RHS so the
+    # block param names land in lnames alongside the user-stmt locals.
+    ci_lc = 0
+    while ci_lc < @const_expr_ids.length
+      if @const_expr_ids[ci_lc] >= 0
+        scan_locals(@const_expr_ids[ci_lc], lnames, ltypes, empty_params)
+      end
+      ci_lc = ci_lc + 1
+    end
 
     # Declare vars for second pass to resolve dependent types
     j = 0
