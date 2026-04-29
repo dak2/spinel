@@ -4941,7 +4941,12 @@ class Compiler
           end
         end
       }
+      # Pin lexical scope while collecting ivars. See longer comment
+      # at the other collect_ivars call site below for rationale.
+      saved_idx = @current_class_idx
+      @current_class_idx = ci
       collect_ivars(ci)
+      @current_class_idx = saved_idx
       return
     end
 
@@ -5116,8 +5121,17 @@ class Compiler
       end
     }
 
-    # Collect ivars
+    # Collect ivars. Pin the lexical scope to this class so any
+    # `@x = Foo.new(...)` inside its methods resolves `Foo` against
+    # the same scope chain the call site sees — without this,
+    # current_lexical_scope_name returns "" and a `Config` reference
+    # inside `Optcarrot::NES` resolves to bare "Config" (no
+    # Optcarrot_ prefix), poisoning the ivar's recorded type and the
+    # eventual `sp_Config *` field declaration that fails to compile.
+    saved_idx = @current_class_idx
+    @current_class_idx = ci
     collect_ivars(ci)
+    @current_class_idx = saved_idx
   end
 
   def collect_module_methods_into_class(ci, mod_name)
@@ -7266,6 +7280,14 @@ class Compiler
     i = 0
     while i < @meth_names.length
       push_scope
+      # Pin @current_method_name so current_lexical_scope_name can pull
+      # the module prefix out of `<Mod>_cls_<m>` style names. Without
+      # this, a `Foo.new` inside e.g. `Optcarrot::Driver.load` resolves
+      # `Foo` against the empty scope and lands on bare `Foo` instead
+      # of `Optcarrot_Foo`, which then poisons the local variable's
+      # recorded type.
+      saved_meth = @current_method_name
+      @current_method_name = @meth_names[i]
       pnames = @meth_param_names[i].split(",")
       ptypes = @meth_param_types[i].split(",")
       j = 0
@@ -7289,6 +7311,7 @@ class Compiler
         end
         scan_writer_calls(@meth_body_ids[i])
       end
+      @current_method_name = saved_meth
       pop_scope
       i = i + 1
     end
@@ -13659,7 +13682,17 @@ class Compiler
       if @nd_type[sid] != "DefNode"
         if @nd_type[sid] != "ClassNode"
           if @nd_type[sid] != "ConstantWriteNode"
-            scan_locals(sid, lnames, ltypes, empty_params)
+            # Skip ModuleNode bodies — their nested classes/methods are
+            # collected separately, and recursing into them here would
+            # pull every nested method's locals into main()'s frame and
+            # also mis-resolve constants (no lexical scope is in effect
+            # at this scan, so e.g. `Video.new(...)` inside a module
+            # function lands on bare `Video` instead of the namespaced
+            # form). The other passes below already filter ModuleNode;
+            # this one was the outlier.
+            if @nd_type[sid] != "ModuleNode"
+              scan_locals(sid, lnames, ltypes, empty_params)
+            end
           end
         end
       end
