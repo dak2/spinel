@@ -10598,6 +10598,7 @@ class Compiler
   end
 
   def emit_constructor(ci)
+    saved_gc_scope = @in_gc_scope
     cname = @cls_names[ci]
     init_idx = cls_find_method_direct(ci, "initialize")
     if @cls_is_value_type[ci] == 1
@@ -10606,6 +10607,7 @@ class Compiler
     else
       emit_raw("static inline sp_" + cname + " *sp_" + cname + "_new(" + constructor_params_decl(ci) + ") {")
       emit_raw("  SP_GC_SAVE();")
+      @in_gc_scope = 1
       scan_fn = "NULL"
       if class_has_ptr_ivars(ci) == 1
         scan_fn = "sp_" + cname + "_gc_scan"
@@ -10758,6 +10760,7 @@ class Compiler
     emit_raw("  return self;")
     emit_raw("}")
     emit_raw("")
+    @in_gc_scope = saved_gc_scope
 
     # Initialize function (for super calls) - always uses *self (pointer)
     if init_idx >= 0
@@ -11141,7 +11144,7 @@ class Compiler
       j = j + 1
     end
     if has_gc_locals == 1
-      if @needs_gc == 1
+      if @needs_gc == 1 && @in_gc_scope == 0
         emit("  SP_GC_SAVE();")
         @in_gc_scope = 1
       end
