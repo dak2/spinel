@@ -38,12 +38,19 @@ skip_to_prefix(const mrb_regexp_pattern *pat, const char *sp, const char *str_en
 #define FIRST_BYTE_OK(pat, ch) \
   ((ch) >= 128 || ((pat)->first_bytes[(ch) >> 3] & (1 << ((ch) & 7))))
 
-/* Check if character matches a character class */
+/* Check if a codepoint matches a character class. ASCII (cp < 128) hits
+   the bitmap; non-ASCII falls back to the inclusive (lo, hi) range list,
+   then to the utf8_any catch-all (used by negated shorthand like \D). */
 static mrb_bool
-class_match(const re_charclass *cc, uint8_t ch)
+class_match(const re_charclass *cc, uint32_t cp)
 {
-  if (ch >= 128) return cc->utf8_any;
-  return (cc->bitmap[ch >> 3] >> (ch & 7)) & 1;
+  if (cp < 128) {
+    return (cc->bitmap[cp >> 3] >> (cp & 7)) & 1;
+  }
+  for (uint16_t i = 0; i < cc->num_ranges; i++) {
+    if (cp >= cc->ranges[2*i] && cp <= cc->ranges[2*i + 1]) return TRUE;
+  }
+  return cc->utf8_any;
 }
 
 /*
@@ -274,6 +281,13 @@ pike_vm(const mrb_regexp_pattern *pat,
           if (sp > str_end) break;
         }
       }
+      /* Don't seed a new match attempt at a UTF-8 continuation byte —
+         a multi-byte char's interior is not a valid char boundary, and
+         starting a thread there mis-decodes the char (e.g. a class-
+         match on a stray 0x82 instead of the leader's full codepoint). */
+      if (curr.count == 0 && sp < str_end && ((uint8_t)*sp & 0xC0) == 0x80) {
+        continue;
+      }
       int slot = match_only ? 0 : pool_alloc(&s);
       if (!match_only) memset(CAP(&s, slot), -1, sizeof(int) * ncap);
       s.gen++;
@@ -300,6 +314,14 @@ pike_vm(const mrb_regexp_pattern *pat,
 
     int ch = (uint8_t)*sp;
     int advance = re_utf8_charlen(sp, str_end);
+    /* Decoded codepoint of the current input char. Identical to `ch`
+       for ASCII; lazily decoded only when something downstream actually
+       inspects a non-ASCII char class. */
+    uint32_t curr_cp = (uint32_t)ch;
+    if (advance > 1) {
+      int dlen = 0;
+      curr_cp = re_utf8_decode(sp, &dlen);
+    }
 
     for (int i = 0; i < curr.count; i++) {
       re_thread *th = &curr.threads[i];
@@ -329,14 +351,14 @@ pike_vm(const mrb_regexp_pattern *pat,
         break;
 
       case RE_CLASS:
-        if (class_match(&pat->classes[inst.a], (uint8_t)ch)) {
+        if (class_match(&pat->classes[inst.a], curr_cp)) {
           int cp = match_only ? 0 : pool_copy(&s, th->cap_slot);
           add_thread(&s, &next, th->pc + 1, cp, sp + advance);
         }
         break;
 
       case RE_NCLASS:
-        if (!class_match(&pat->classes[inst.a], (uint8_t)ch)) {
+        if (!class_match(&pat->classes[inst.a], curr_cp)) {
           int cp = match_only ? 0 : pool_copy(&s, th->cap_slot);
           add_thread(&s, &next, th->pc + 1, cp, sp + advance);
         }
@@ -409,13 +431,25 @@ bt_match(const mrb_regexp_pattern *pat, const char *str, const char *str_end,
       break;
 
     case RE_CLASS:
-      if (sp >= str_end || !class_match(&pat->classes[inst.a], (uint8_t)*sp)) return FALSE;
-      sp += re_utf8_charlen(sp, str_end); pc++;
+      if (sp >= str_end) return FALSE;
+      {
+        int dlen = 0;
+        uint32_t cp_ = re_utf8_decode(sp, &dlen);
+        if (!class_match(&pat->classes[inst.a], cp_)) return FALSE;
+        sp += re_utf8_charlen(sp, str_end);
+      }
+      pc++;
       break;
 
     case RE_NCLASS:
-      if (sp >= str_end || class_match(&pat->classes[inst.a], (uint8_t)*sp)) return FALSE;
-      sp += re_utf8_charlen(sp, str_end); pc++;
+      if (sp >= str_end) return FALSE;
+      {
+        int dlen = 0;
+        uint32_t cp_ = re_utf8_decode(sp, &dlen);
+        if (class_match(&pat->classes[inst.a], cp_)) return FALSE;
+        sp += re_utf8_charlen(sp, str_end);
+      }
+      pc++;
       break;
 
     case RE_MATCH:

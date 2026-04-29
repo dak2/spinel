@@ -122,6 +122,26 @@ class_set_bit(re_charclass *cc, uint8_t ch)
   }
 }
 
+/* Append a non-ASCII codepoint range [lo, hi]. Both bounds must be >= 128. */
+static void
+class_add_range(re_charclass *cc, uint32_t lo, uint32_t hi)
+{
+  if (cc->num_ranges >= cc->range_capa) {
+    cc->range_capa = cc->range_capa ? cc->range_capa * 2 : 4;
+    cc->ranges = (uint32_t*)realloc(cc->ranges, sizeof(uint32_t) * 2 * cc->range_capa);
+  }
+  cc->ranges[2 * cc->num_ranges] = lo;
+  cc->ranges[2 * cc->num_ranges + 1] = hi;
+  cc->num_ranges++;
+}
+
+/* Add a single non-ASCII codepoint to the class. */
+static void
+class_add_codepoint(re_charclass *cc, uint32_t cp)
+{
+  class_add_range(cc, cp, cp);
+}
+
 static void
 class_set_range(re_charclass *cc, uint8_t lo, uint8_t hi)
 {
@@ -189,6 +209,29 @@ parse_escape(re_compiler *c)
   }
 }
 
+/* Read one character class atom: either an ASCII byte (0-127), a
+   `\escape`, or a full multi-byte UTF-8 codepoint. Returns the
+   codepoint and advances c->p. */
+static uint32_t
+read_class_atom(re_compiler *c)
+{
+  if (peek(c) == '\\') {
+    next_char(c);
+    return (uint32_t)parse_escape(c);
+  }
+  uint8_t b = (uint8_t)*c->p;
+  if (b < 0xC0) {
+    /* ASCII or stray continuation byte. */
+    return (uint32_t)next_char(c);
+  }
+  /* Multi-byte UTF-8 leader: decode the full codepoint. */
+  int len = 0;
+  uint32_t cp = re_utf8_decode(c->p, &len);
+  if (c->p + len > c->src_end) len = (int)(c->src_end - c->p);
+  c->p += len;
+  return cp;
+}
+
 /* Parse [...] character class */
 static void
 compile_charclass(re_compiler *c)
@@ -204,42 +247,42 @@ compile_charclass(re_compiler *c)
 
   mrb_bool first = TRUE;
   while (peek(c) != ']' || first) {
-    int ch;
-
     if (peek(c) < 0) compile_error(c, "unterminated character class");
     first = FALSE;
 
+    /* Shorthand classes (\d, \D, \w, \W, \s, \S) are handled before
+       the codepoint-aware path so the single-byte semantics stay
+       intact. */
     if (peek(c) == '\\') {
-      next_char(c);
-      int esc = peek(c);
+      int esc = (c->p + 1 < c->src_end) ? (uint8_t)c->p[1] : -1;
       if (esc == 'd' || esc == 'D' || esc == 'w' || esc == 'W' || esc == 's' || esc == 'S') {
-        next_char(c);
+        next_char(c);  /* '\\' */
+        next_char(c);  /* spec  */
         class_add_shorthand(cc, esc);
         continue;
       }
-      ch = parse_escape(c);
-    }
-    else {
-      ch = next_char(c);
     }
 
-    /* check for range a-z */
+    uint32_t cp = read_class_atom(c);
+
+    /* check for range a-z (or U+xxxx-U+yyyy) */
     if (peek(c) == '-' && c->p + 1 < c->src_end && c->p[1] != ']') {
       next_char(c);  /* skip '-' */
-      int hi;
-      if (peek(c) == '\\') {
-        next_char(c);
-        hi = parse_escape(c);
+      uint32_t hi = read_class_atom(c);
+      if (cp < 128 && hi < 128) {
+        class_set_range(cc, (uint8_t)cp, (uint8_t)hi);
       }
       else {
-        hi = next_char(c);
-      }
-      if (ch < 128 && hi < 128) {
-        class_set_range(cc, (uint8_t)ch, (uint8_t)hi);
+        /* Range that touches non-ASCII: store as codepoint range.
+           Mixed ASCII/non-ASCII ranges are rare; stash the whole
+           span in the codepoint list (the bitmap covers ASCII only,
+           so a non-ASCII upper bound forces the codepoint path). */
+        if (cp <= hi) class_add_range(cc, cp, hi);
       }
     }
     else {
-      if (ch < 128) class_set_bit(cc, (uint8_t)ch);
+      if (cp < 128) class_set_bit(cc, (uint8_t)cp);
+      else class_add_codepoint(cc, cp);
     }
   }
   next_char(c);  /* skip ']' */
@@ -771,6 +814,7 @@ first_set_walk(const re_inst *code, uint32_t code_len,
       const re_charclass *cc = &classes[code[pc].a];
       for (int i = 0; i < 16; i++) bm[i] |= cc->bitmap[i];
       if (cc->utf8_any) return FALSE;  /* non-ASCII possible */
+      if (cc->num_ranges > 0) return FALSE;  /* non-ASCII codepoints possible */
       return TRUE;
     }
     case RE_NCLASS: {
@@ -919,7 +963,12 @@ re_free(mrb_regexp_pattern *pat)
 {
   if (pat) {
     free(pat->code);
-    free(pat->classes);
+    if (pat->classes) {
+      for (uint16_t i = 0; i < pat->num_classes; i++) {
+        free(pat->classes[i].ranges);
+      }
+      free(pat->classes);
+    }
     free(pat->named_captures);
     free(pat->prefix);
     free(pat->cached_visited);
