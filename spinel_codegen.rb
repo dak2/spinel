@@ -17824,12 +17824,32 @@ class Compiler
   # that concrete type is used. If any two disagree, the call is
   # genuinely polymorphic and the caller must treat the result as
   # an sp_RbVal.
+  # Returns 1 if class `ci` declares `mname` as an attr_reader (in
+  # which case `obj.<mname>` reads `obj->iv_<mname>`).
+  def cls_has_attr_reader(ci, mname)
+    readers = @cls_attr_readers[ci].split(";")
+    j = 0
+    while j < readers.length
+      if readers[j] == mname
+        return 1
+      end
+      j = j + 1
+    end
+    0
+  end
+
   def poly_dispatch_return_type(mname)
     common = ""
     ci = 0
     while ci < @cls_names.length
+      rt = ""
       if cls_find_method_direct(ci, mname) >= 0
         rt = cls_method_return(ci, mname)
+      elsif cls_has_attr_reader(ci, mname) == 1
+        # An attr_reader returns the ivar type. Issue #119.
+        rt = cls_ivar_type(ci, "@" + mname)
+      end
+      if rt != ""
         if common == ""
           common = rt
         elsif common != rt
@@ -17892,6 +17912,17 @@ class Compiler
         if is_poly_ret == 1
           this_rt = cls_method_return(i, mname)
           rhs = box_val_to_poly(call_expr, this_rt)
+        end
+        emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") " + tmp + " = " + rhs + ";")
+      elsif cls_has_attr_reader(i, mname) == 1
+        # An auto-registered attr_reader doesn't appear in
+        # @cls_meth_names, so the explicit-method walk above misses it.
+        # Read the ivar directly. Issue #119.
+        ivar_expr = "((sp_" + cname + " *)" + recv_tmp + ".v.p)->" + sanitize_ivar("@" + mname)
+        rhs = ivar_expr
+        if is_poly_ret == 1
+          this_rt = cls_ivar_type(i, "@" + mname)
+          rhs = box_val_to_poly(ivar_expr, this_rt)
         end
         emit("    if (" + recv_tmp + ".cls_id == " + i.to_s + ") " + tmp + " = " + rhs + ";")
       end
