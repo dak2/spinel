@@ -5774,84 +5774,14 @@ class Compiler
     if @nd_type[nid] == "DefNode"
       return 0
     end
-    if @nd_type[nid] == "BlockNode"
-      # Don't look inside blocks of other calls for yield
-      # Actually we do - yield inside a block still belongs to enclosing method
-    end
-    # Recurse children
-    if @nd_body[nid] >= 0
-      if body_has_yield(@nd_body[nid]) == 1
-        return 1
-      end
-    end
-    stmts = parse_id_list(@nd_stmts[nid])
+    cs = []
+    push_child_ids(nid, cs)
     k = 0
-    while k < stmts.length
-      if body_has_yield(stmts[k]) == 1
+    while k < cs.length
+      if body_has_yield(cs[k]) == 1
         return 1
       end
       k = k + 1
-    end
-    if @nd_expression[nid] >= 0
-      if body_has_yield(@nd_expression[nid]) == 1
-        return 1
-      end
-    end
-    if @nd_predicate[nid] >= 0
-      if body_has_yield(@nd_predicate[nid]) == 1
-        return 1
-      end
-    end
-    if @nd_subsequent[nid] >= 0
-      if body_has_yield(@nd_subsequent[nid]) == 1
-        return 1
-      end
-    end
-    if @nd_else_clause[nid] >= 0
-      if body_has_yield(@nd_else_clause[nid]) == 1
-        return 1
-      end
-    end
-    if @nd_left[nid] >= 0
-      if body_has_yield(@nd_left[nid]) == 1
-        return 1
-      end
-    end
-    if @nd_right[nid] >= 0
-      if body_has_yield(@nd_right[nid]) == 1
-        return 1
-      end
-    end
-    if @nd_block[nid] >= 0
-      if body_has_yield(@nd_block[nid]) == 1
-        return 1
-      end
-    end
-    conds = parse_id_list(@nd_conditions[nid])
-    k = 0
-    while k < conds.length
-      if body_has_yield(conds[k]) == 1
-        return 1
-      end
-      k = k + 1
-    end
-    args = parse_id_list(@nd_args[nid])
-    k = 0
-    while k < args.length
-      if body_has_yield(args[k]) == 1
-        return 1
-      end
-      k = k + 1
-    end
-    if @nd_arguments[nid] >= 0
-      if body_has_yield(@nd_arguments[nid]) == 1
-        return 1
-      end
-    end
-    if @nd_receiver[nid] >= 0
-      if body_has_yield(@nd_receiver[nid]) == 1
-        return 1
-      end
     end
     0
   end
@@ -5879,53 +5809,12 @@ class Compiler
     if @nd_type[nid] == "DefNode"
       return current
     end
-    if @nd_body[nid] >= 0
-      current = body_max_yield_arity(@nd_body[nid], current)
-    end
-    stmts = parse_id_list(@nd_stmts[nid])
+    cs = []
+    push_child_ids(nid, cs)
     k = 0
-    while k < stmts.length
-      current = body_max_yield_arity(stmts[k], current)
+    while k < cs.length
+      current = body_max_yield_arity(cs[k], current)
       k = k + 1
-    end
-    if @nd_expression[nid] >= 0
-      current = body_max_yield_arity(@nd_expression[nid], current)
-    end
-    if @nd_predicate[nid] >= 0
-      current = body_max_yield_arity(@nd_predicate[nid], current)
-    end
-    if @nd_subsequent[nid] >= 0
-      current = body_max_yield_arity(@nd_subsequent[nid], current)
-    end
-    if @nd_else_clause[nid] >= 0
-      current = body_max_yield_arity(@nd_else_clause[nid], current)
-    end
-    if @nd_left[nid] >= 0
-      current = body_max_yield_arity(@nd_left[nid], current)
-    end
-    if @nd_right[nid] >= 0
-      current = body_max_yield_arity(@nd_right[nid], current)
-    end
-    if @nd_block[nid] >= 0
-      current = body_max_yield_arity(@nd_block[nid], current)
-    end
-    conds = parse_id_list(@nd_conditions[nid])
-    k = 0
-    while k < conds.length
-      current = body_max_yield_arity(conds[k], current)
-      k = k + 1
-    end
-    args = parse_id_list(@nd_args[nid])
-    k = 0
-    while k < args.length
-      current = body_max_yield_arity(args[k], current)
-      k = k + 1
-    end
-    if @nd_arguments[nid] >= 0
-      current = body_max_yield_arity(@nd_arguments[nid], current)
-    end
-    if @nd_receiver[nid] >= 0
-      current = body_max_yield_arity(@nd_receiver[nid], current)
     end
     current
   end
@@ -7065,39 +6954,15 @@ class Compiler
         end
       end
     end
-    # Recurse
-    if @nd_body[nid] >= 0
-      scan_writer_calls(@nd_body[nid])
-    end
-    stmts = parse_id_list(@nd_stmts[nid])
+    # Recurse via the centralized child walker (push_child_ids covers
+    # the full set of AST slots — visiting a few extra slots is a
+    # no-op for nodes scan_writer_calls doesn't recognise).
+    cs = []
+    push_child_ids(nid, cs)
     k = 0
-    while k < stmts.length
-      scan_writer_calls(stmts[k])
+    while k < cs.length
+      scan_writer_calls(cs[k])
       k = k + 1
-    end
-    if @nd_expression[nid] >= 0
-      scan_writer_calls(@nd_expression[nid])
-    end
-    if @nd_arguments[nid] >= 0
-      scan_writer_calls(@nd_arguments[nid])
-    end
-    args = parse_id_list(@nd_args[nid])
-    k = 0
-    while k < args.length
-      scan_writer_calls(args[k])
-      k = k + 1
-    end
-    if @nd_block[nid] >= 0
-      scan_writer_calls(@nd_block[nid])
-    end
-    if @nd_predicate[nid] >= 0
-      scan_writer_calls(@nd_predicate[nid])
-    end
-    if @nd_subsequent[nid] >= 0
-      scan_writer_calls(@nd_subsequent[nid])
-    end
-    if @nd_else_clause[nid] >= 0
-      scan_writer_calls(@nd_else_clause[nid])
     end
   end
 
@@ -8405,89 +8270,158 @@ class Compiler
     scan_features_children(nid)
   end
 
-  def scan_features_children(nid)
+  # Push every child node id of `nid` into `acc`. Centralizes the
+  # AST slot-by-slot recursion that ~10 different scan/collect passes
+  # (scan_features_children, scan_writer_calls, body_has_yield,
+  # body_max_yield_arity, ieval_walk, collect_constructed_class_names,
+  # subtree_has_setter_on_params, subtree_has_ivar_write, …) used to
+  # open-code identically. Slot coverage matches the most-thorough
+  # walker (scan_features_children) — adding a new ref slot in alloc
+  # only requires updating this one helper.
+  #
+  # The accumulator-into-an-array shape is deliberate: callers iterate
+  # over the result with their own loop, which lets early-exit walkers
+  # (`body_has_yield`) bail mid-iteration cleanly. A yielding
+  # form would lock the call site into a yield-block-forwarding path
+  # and complicate dispatch unnecessarily.
+  def push_child_ids(nid, acc)
     if @nd_body[nid] >= 0
-      scan_features(@nd_body[nid])
+      acc.push(@nd_body[nid])
     end
     stmts = parse_id_list(@nd_stmts[nid])
     k = 0
     while k < stmts.length
-      scan_features(stmts[k])
+      acc.push(stmts[k])
       k = k + 1
     end
     if @nd_expression[nid] >= 0
-      scan_features(@nd_expression[nid])
+      acc.push(@nd_expression[nid])
     end
     if @nd_predicate[nid] >= 0
-      scan_features(@nd_predicate[nid])
+      acc.push(@nd_predicate[nid])
     end
     if @nd_subsequent[nid] >= 0
-      scan_features(@nd_subsequent[nid])
+      acc.push(@nd_subsequent[nid])
     end
     if @nd_else_clause[nid] >= 0
-      scan_features(@nd_else_clause[nid])
+      acc.push(@nd_else_clause[nid])
     end
     if @nd_receiver[nid] >= 0
-      scan_features(@nd_receiver[nid])
+      acc.push(@nd_receiver[nid])
     end
     if @nd_arguments[nid] >= 0
-      scan_features(@nd_arguments[nid])
+      acc.push(@nd_arguments[nid])
     end
     args = parse_id_list(@nd_args[nid])
     k = 0
     while k < args.length
-      scan_features(args[k])
+      acc.push(args[k])
       k = k + 1
     end
     conds = parse_id_list(@nd_conditions[nid])
     k = 0
     while k < conds.length
-      scan_features(conds[k])
+      acc.push(conds[k])
       k = k + 1
     end
     elems = parse_id_list(@nd_elements[nid])
     k = 0
     while k < elems.length
-      scan_features(elems[k])
+      acc.push(elems[k])
       k = k + 1
     end
     parts = parse_id_list(@nd_parts[nid])
     k = 0
     while k < parts.length
-      scan_features(parts[k])
+      acc.push(parts[k])
       k = k + 1
     end
     if @nd_left[nid] >= 0
-      scan_features(@nd_left[nid])
+      acc.push(@nd_left[nid])
     end
     if @nd_right[nid] >= 0
-      scan_features(@nd_right[nid])
+      acc.push(@nd_right[nid])
     end
     if @nd_block[nid] >= 0
-      scan_features(@nd_block[nid])
+      acc.push(@nd_block[nid])
     end
     if @nd_key[nid] >= 0
-      scan_features(@nd_key[nid])
+      acc.push(@nd_key[nid])
     end
     if @nd_collection[nid] >= 0
-      scan_features(@nd_collection[nid])
+      acc.push(@nd_collection[nid])
     end
     if @nd_target[nid] >= 0
-      scan_features(@nd_target[nid])
+      acc.push(@nd_target[nid])
     end
     if @nd_parameters[nid] >= 0
-      scan_features(@nd_parameters[nid])
+      acc.push(@nd_parameters[nid])
+    end
+    if @nd_rest[nid] >= 0
+      acc.push(@nd_rest[nid])
+    end
+    if @nd_rescue_clause[nid] >= 0
+      acc.push(@nd_rescue_clause[nid])
+    end
+    if @nd_ensure_clause[nid] >= 0
+      acc.push(@nd_ensure_clause[nid])
+    end
+    if @nd_pattern[nid] >= 0
+      acc.push(@nd_pattern[nid])
+    end
+    if @nd_reference[nid] >= 0
+      acc.push(@nd_reference[nid])
+    end
+    if @nd_constant_path[nid] >= 0
+      acc.push(@nd_constant_path[nid])
+    end
+    if @nd_superclass[nid] >= 0
+      acc.push(@nd_superclass[nid])
     end
     reqs = parse_id_list(@nd_requireds[nid])
     k = 0
     while k < reqs.length
-      scan_features(reqs[k])
+      acc.push(reqs[k])
       k = k + 1
     end
     opts = parse_id_list(@nd_optionals[nid])
     k = 0
     while k < opts.length
-      scan_features(opts[k])
+      acc.push(opts[k])
+      k = k + 1
+    end
+    kws = parse_id_list(@nd_keywords[nid])
+    k = 0
+    while k < kws.length
+      acc.push(kws[k])
+      k = k + 1
+    end
+    excs = parse_id_list(@nd_exceptions[nid])
+    k = 0
+    while k < excs.length
+      acc.push(excs[k])
+      k = k + 1
+    end
+    targs = parse_id_list(@nd_targets[nid])
+    k = 0
+    while k < targs.length
+      acc.push(targs[k])
+      k = k + 1
+    end
+    rights = parse_id_list(@nd_rights[nid])
+    k = 0
+    while k < rights.length
+      acc.push(rights[k])
+      k = k + 1
+    end
+  end
+
+  def scan_features_children(nid)
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      scan_features(cs[k])
       k = k + 1
     end
   end
@@ -10039,30 +9973,6 @@ class Compiler
     "self->"
   end
 
-  def check_ivar_write_child(child_nid)
-    if child_nid >= 0
-      if subtree_has_ivar_write(child_nid) == 1
-        return 1
-      end
-    end
-    0
-  end
-
-  def check_ivar_write_list(list_str)
-    if list_str != ""
-      parts = list_str.split(",")
-      pi = 0
-      while pi < parts.length
-        id = parts[pi].to_i
-        if id > 0 && subtree_has_ivar_write(id) == 1
-          return 1
-        end
-        pi = pi + 1
-      end
-    end
-    0
-  end
-
   def subtree_has_ivar_write(nid)
     if nid < 0 || nid >= @nd_count
       return 0
@@ -10071,26 +9981,15 @@ class Compiler
     if t == "InstanceVariableWriteNode" || t == "InstanceVariableOperatorWriteNode" || t == "InstanceVariableTargetNode"
       return 1
     end
-    # Check integer child references
-    if check_ivar_write_child(@nd_body[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_expression[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_predicate[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_subsequent[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_else_clause[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_left[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_right[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_target[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_rescue_clause[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_ensure_clause[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_collection[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_rest[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_arguments[nid]) == 1; return 1; end
-    if check_ivar_write_child(@nd_block[nid]) == 1; return 1; end
-    # Check string-list children (comma-separated node IDs)
-    if check_ivar_write_list(@nd_stmts[nid]) == 1; return 1; end
-    if check_ivar_write_list(@nd_elements[nid]) == 1; return 1; end
-    if check_ivar_write_list(@nd_targets[nid]) == 1; return 1; end
-    if check_ivar_write_list(@nd_rights[nid]) == 1; return 1; end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      if subtree_has_ivar_write(cs[k]) == 1
+        return 1
+      end
+      k = k + 1
+    end
     0
   end
 
@@ -10282,34 +10181,6 @@ class Compiler
     end
   end
 
-  def check_setter_on_params_child(child_nid, param_names)
-    if child_nid >= 0
-      r = subtree_has_setter_on_params(child_nid, param_names)
-      if r != ""
-        return r
-      end
-    end
-    ""
-  end
-
-  def check_setter_on_params_list(list_str, param_names)
-    if list_str != ""
-      parts = list_str.split(",")
-      pi2 = 0
-      while pi2 < parts.length
-        id = parts[pi2].to_i
-        if id > 0
-          r = subtree_has_setter_on_params(id, param_names)
-          if r != ""
-            return r
-          end
-        end
-        pi2 = pi2 + 1
-      end
-    end
-    ""
-  end
-
   def subtree_has_setter_on_params(nid, param_names)
     if nid < 0 || nid >= @nd_count
       return ""
@@ -10332,44 +10203,16 @@ class Compiler
         end
       end
     end
-    # Recurse into integer children
-    r = check_setter_on_params_child(@nd_body[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_expression[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_predicate[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_subsequent[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_else_clause[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_left[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_right[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_target[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_rescue_clause[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_ensure_clause[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_collection[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_rest[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_arguments[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_child(@nd_block[nid], param_names)
-    if r != ""; return r; end
-    # Recurse into string-list children
-    r = check_setter_on_params_list(@nd_stmts[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_list(@nd_elements[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_list(@nd_targets[nid], param_names)
-    if r != ""; return r; end
-    r = check_setter_on_params_list(@nd_rights[nid], param_names)
-    if r != ""; return r; end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      r = subtree_has_setter_on_params(cs[k], param_names)
+      if r != ""
+        return r
+      end
+      k = k + 1
+    end
     ""
   end
 
@@ -10395,45 +10238,12 @@ class Compiler
         end
       end
     end
-    # Recurse into the conventional child slots.
-    if @nd_body[nid] >= 0
-      collect_constructed_class_names(@nd_body[nid], out)
-    end
-    stmts = parse_id_list(@nd_stmts[nid])
+    cs = []
+    push_child_ids(nid, cs)
     k = 0
-    while k < stmts.length
-      collect_constructed_class_names(stmts[k], out)
+    while k < cs.length
+      collect_constructed_class_names(cs[k], out)
       k = k + 1
-    end
-    if @nd_expression[nid] >= 0
-      collect_constructed_class_names(@nd_expression[nid], out)
-    end
-    if @nd_predicate[nid] >= 0
-      collect_constructed_class_names(@nd_predicate[nid], out)
-    end
-    if @nd_subsequent[nid] >= 0
-      collect_constructed_class_names(@nd_subsequent[nid], out)
-    end
-    if @nd_else_clause[nid] >= 0
-      collect_constructed_class_names(@nd_else_clause[nid], out)
-    end
-    if @nd_receiver[nid] >= 0
-      collect_constructed_class_names(@nd_receiver[nid], out)
-    end
-    if @nd_arguments[nid] >= 0
-      collect_constructed_class_names(@nd_arguments[nid], out)
-    end
-    args = parse_id_list(@nd_args[nid])
-    k = 0
-    while k < args.length
-      collect_constructed_class_names(args[k], out)
-      k = k + 1
-    end
-    if @nd_left[nid] >= 0
-      collect_constructed_class_names(@nd_left[nid], out)
-    end
-    if @nd_right[nid] >= 0
-      collect_constructed_class_names(@nd_right[nid], out)
     end
   end
 
