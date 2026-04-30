@@ -98,7 +98,21 @@ static char *sp_str_alloc(size_t len) {
   h->next = sp_str_heap;
   h->size = total;
   sp_str_heap = h;
-  sp_gc_bytes += total;
+  /* Don't fold string-heap pressure into sp_gc_bytes (issue #99): the
+     threshold heuristic in sp_gc_alloc is keyed on heap survivors, and
+     the str-heap mark-sweep that runs alongside (sp_str_sweep,
+     called from sp_gc_collect) doesn't add surviving strings back into
+     sp_gc_bytes. Each string alloc increments sp_gc_bytes by its full
+     size, but a sweep that reaps a string subtracts its size — and a
+     surviving string's size isn't re-added on the way out of
+     sp_gc_collect. Net effect on a workload that mixes heap allocs
+     with frequent small string allocs (e.g. `puts <float>` in a tight
+     loop): sp_gc_bytes drifts low after each collect, freed/before
+     looks artificially large, the threshold-recompute branch in
+     sp_gc_alloc takes the `sp_gc_bytes*4` path with a too-small base,
+     and the GC starts firing on every allocation. Strings are still
+     reaped via sp_str_sweep on every gc cycle, so dropping the
+     accounting only removes the threshold noise. */
   char *body = (char *)(h + 1);
   body[0] = (char)0xfe;
   body[1 + len] = 0;
@@ -148,7 +162,8 @@ static void sp_str_sweep(void) {
       pp = &h->next;
     } else {
       *pp = h->next;
-      sp_gc_bytes -= h->size;
+      /* String allocs no longer fold into sp_gc_bytes (see
+         sp_str_alloc); the matching subtract here drops too. */
       free(h);
     }
   }
