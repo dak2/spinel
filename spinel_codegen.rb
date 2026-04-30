@@ -26328,6 +26328,20 @@ class Compiler
             return
           end
         end
+        # Constructor-with-block: `Array.new(n) { ... }`,
+        # `Hash.new { ... }`, etc. compile_expr already builds the
+        # collection into a temp and returns its name; the catch-all
+        # below would fall through to `compile_stmt + return default`,
+        # discard the temp, and return NULL — which segfaults on the
+        # next call site that reads from the result. Route through
+        # compile_expr so the temp name is the function's return value.
+        if lmname == "new"
+          if return_type != "void"
+            val = compile_expr(last)
+            emit("  return " + val + ";")
+            return
+          end
+        end
         compile_stmt(last)
         if return_type != "void"
           emit("  return " + c_return_default(return_type) + ";")

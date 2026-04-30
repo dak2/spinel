@@ -16,14 +16,20 @@ def cell_get(cells, x, y)
   cells[(y % H) * W + (x % W)]
 end
 
+# Range-with-block idioms (`(-1..1).count { ... }`, `(-1..1).sum { ... }`,
+# `SIZE.times.map { ... }`) aren't implemented in spinel's codegen yet —
+# they emit a deduped warning and a literal 0 at codegen time. Use the
+# Array equivalents so the generation actually runs.
+OFFSETS = [-1, 0, 1]
+
 def neighbors(cells, x, y)
-  (-1..1).sum { |iy|
-    (-1..1).count { |ix| cell_get(cells, x + ix, y + iy) == 1 }
+  OFFSETS.sum { |iy|
+    OFFSETS.count { |ix| cell_get(cells, x + ix, y + iy) == 1 }
   }
 end
 
 def next_gen(cells)
-  SIZE.times.map { |i|
+  Array.new(SIZE) { |i|
     y = i / W
     x = i % W
     n = neighbors(cells, x, y)
@@ -38,7 +44,7 @@ def next_gen(cells)
 end
 
 # Initialize with a deterministic pattern (glider + blinker)
-cells = SIZE.times.map { 0 }
+cells = Array.new(SIZE) { 0 }
 
 # Glider at (1,1)
 cells[1 * W + 2] = 1
