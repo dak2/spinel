@@ -12304,6 +12304,11 @@ class Compiler
       # until first `push` (issue #58). A subsequent write with a
       # concrete element resets the flag to "".
       @scan_empty_flags = "".split(",")
+      # Parallel to `names`: "1" if the FIRST write to this local was an
+      # empty `{}` literal — promote_empty_hash_local_writes uses this to
+      # decide whether to refine str_int_hash (the empty-hash default)
+      # to a more specific variant on first []= write.
+      @scan_empty_hash_flags = "".split(",")
     end
     if @nd_type[nid] == "MultiWriteNode"
       targets = parse_id_list(@nd_targets[nid])
@@ -12318,6 +12323,7 @@ class Compiler
               types.push(multi_write_target_type(val_id2, ti2))
               @scan_literal_flags.push("")
               @scan_empty_flags.push("")
+              @scan_empty_hash_flags.push("")
             end
           end
         end
@@ -12334,6 +12340,7 @@ class Compiler
               types.push(splat_rest_type(val_id2))
               @scan_literal_flags.push("")
               @scan_empty_flags.push("")
+              @scan_empty_hash_flags.push("")
             end
           end
         end
@@ -12360,6 +12367,7 @@ class Compiler
               types.push(multi_write_target_type(val_id2, t_idx2))
               @scan_literal_flags.push("")
               @scan_empty_flags.push("")
+              @scan_empty_hash_flags.push("")
             end
           end
         end
@@ -12388,6 +12396,14 @@ class Compiler
           else
             @scan_empty_flags.push("")
           end
+          # Track empty-hash literal so a later []= write can promote
+          # the local's hash variant from the str_int_hash default to
+          # whatever key/value types the first []= pins.
+          if is_empty_hash_literal(@nd_expression[nid]) == 1
+            @scan_empty_hash_flags.push("1")
+          else
+            @scan_empty_hash_flags.push("")
+          end
         end
       else
         if not_in(lname, params) == 1
@@ -12402,6 +12418,18 @@ class Compiler
                 @scan_empty_flags[ei] = ""
               end
               ei = ei + 1
+            end
+          end
+          # Same shape for empty-hash flag: a non-empty-hash overwrite
+          # commits the local to whatever concrete hash type was
+          # assigned, so a later []= shouldn't trigger promotion.
+          if is_empty_hash_literal(@nd_expression[nid]) == 0
+            ehi = 0
+            while ehi < names.length
+              if names[ehi] == lname && ehi < @scan_empty_hash_flags.length
+                @scan_empty_hash_flags[ehi] = ""
+              end
+              ehi = ehi + 1
             end
           end
           ki = 0
@@ -12759,7 +12787,15 @@ class Compiler
         end
       end
     end
-    # Detect hash value type from h["key"] = val
+    # `local[k] = v` on a local declared as the empty-hash default
+    # (str_int_hash from `local = {}`) — promote based on the actual
+    # key/value types so the C declaration picks the matching
+    # sp_*Hash struct. Mirrors the ivar-side promotion in
+    # scan_writer_calls. Only fires when @scan_empty_hash_flags
+    # confirms every prior write to this local was an empty-hash
+    # literal — concretely-typed hashes (`h = {"a" => 1}`) keep
+    # their declared type even when later []= writes mix value
+    # types.
     if @nd_type[nid] == "CallNode"
       if @nd_name[nid] == "[]="
         recv = @nd_receiver[nid]
@@ -12769,18 +12805,36 @@ class Compiler
           if args_id >= 0
             aargs = get_args(args_id)
             if aargs.length >= 2
-              val_type = infer_type(aargs[1])
-              if val_type == "string"
-                ki = 0
-                while ki < names.length
-                  if names[ki] == hname
-                    if types[ki] == "str_int_hash"
-                      types[ki] = "str_str_hash"
-                      @needs_str_str_hash = 1
+              ki = 0
+              while ki < names.length
+                if names[ki] == hname && types[ki] == "str_int_hash"
+                  if ki < @scan_empty_hash_flags.length && @scan_empty_hash_flags[ki] == "1"
+                    key_type = infer_type(aargs[0])
+                    val_type = infer_type(aargs[aargs.length - 1])
+                    promoted = promote_empty_hash_for(key_type, val_type)
+                    if promoted != "" && promoted != "str_int_hash"
+                      types[ki] = promoted
+                      @scan_empty_hash_flags[ki] = ""
+                      if promoted == "str_str_hash"
+                        @needs_str_str_hash = 1
+                      elsif promoted == "int_str_hash"
+                        @needs_int_str_hash = 1
+                        @needs_int_array = 1
+                      elsif promoted == "sym_int_hash"
+                        @needs_sym_int_hash = 1
+                      elsif promoted == "sym_str_hash"
+                        @needs_sym_str_hash = 1
+                      elsif promoted == "str_poly_hash"
+                        @needs_str_poly_hash = 1
+                        @needs_rb_value = 1
+                      elsif promoted == "sym_poly_hash"
+                        @needs_sym_poly_hash = 1
+                        @needs_rb_value = 1
+                      end
                     end
                   end
-                  ki = ki + 1
                 end
+                ki = ki + 1
               end
             end
           end
@@ -19757,15 +19811,39 @@ class Compiler
           end
         end
       end
-      # Empty hash literal: create the correct hash type
-      if vt == "str_str_hash"
+      # Empty hash literal: create the correct hash type. The local's
+      # type was promoted by scan_locals' empty-hash promotion (str_int_hash
+      # default refined based on first []= site's key/value types).
+      # Without these arms the literal `{}` would always emit
+      # sp_StrIntHash_new() and the assignment would mismatch the
+      # promoted local's struct type.
+      if vt == "str_str_hash" || vt == "int_str_hash" || vt == "sym_int_hash" || vt == "sym_str_hash" || vt == "str_poly_hash" || vt == "sym_poly_hash"
         expr_id2 = @nd_expression[nid]
         if expr_id2 >= 0 && @nd_type[expr_id2] == "HashNode"
           elems2 = parse_id_list(@nd_elements[expr_id2])
           if elems2.length == 0
-            @needs_str_str_hash = 1
             @needs_gc = 1
-            emit("  " + vref + " = sp_StrStrHash_new();")
+            if vt == "str_str_hash"
+              @needs_str_str_hash = 1
+              emit("  " + vref + " = sp_StrStrHash_new();")
+            elsif vt == "int_str_hash"
+              @needs_int_str_hash = 1
+              emit("  " + vref + " = sp_IntStrHash_new();")
+            elsif vt == "sym_int_hash"
+              @needs_sym_int_hash = 1
+              emit("  " + vref + " = sp_SymIntHash_new();")
+            elsif vt == "sym_str_hash"
+              @needs_sym_str_hash = 1
+              emit("  " + vref + " = sp_SymStrHash_new();")
+            elsif vt == "str_poly_hash"
+              @needs_str_poly_hash = 1
+              @needs_rb_value = 1
+              emit("  " + vref + " = sp_StrPolyHash_new();")
+            elsif vt == "sym_poly_hash"
+              @needs_sym_poly_hash = 1
+              @needs_rb_value = 1
+              emit("  " + vref + " = sp_SymPolyHash_new();")
+            end
             return
           end
         end
