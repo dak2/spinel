@@ -2773,6 +2773,13 @@ class Compiler
       end
       return "int"
     end
+    if mname == "intersection"
+      if recv >= 0
+        rt = infer_type(recv)
+        return rt if rt == "int_array" || rt == "sym_array" || rt == "str_array" || rt == "float_array"
+      end
+      return ""
+    end
     ""
   end
 
@@ -16058,6 +16065,20 @@ class Compiler
       if mname == "count"
         return "sp_IntArray_length(" + rc + ")"
       end
+      # intersection: supported for int/sym/str/float arrays.
+      # poly_array and ptr_array fall through (element equality not available at codegen level).
+      # Only the first argument is compiled; multi-argument form (Ruby 2.7+) is not supported.
+      if mname == "intersection"
+        arg = compile_arg0(nid)
+        tmp = new_temp
+        itmp = new_temp
+        emit("  sp_IntArray *" + tmp + " = sp_IntArray_new();")
+        emit("  for (mrb_int " + itmp + " = 0; " + itmp + " < sp_IntArray_length(" + rc + "); " + itmp + "++) {")
+        emit("    mrb_int _v = sp_IntArray_get(" + rc + ", " + itmp + ");")
+        emit("    if (sp_IntArray_include(" + arg + ", _v) && !sp_IntArray_include(" + tmp + ", _v)) sp_IntArray_push(" + tmp + ", _v);")
+        emit("  }")
+        return tmp
+      end
       if mname == "min_by"
         if @nd_block[nid] >= 0
           blk = @nd_block[nid]
@@ -16187,6 +16208,22 @@ class Compiler
       if mname == "last"
         return "sp_FloatArray_get(" + rc + ", -1)"
       end
+      if mname == "intersection"
+        arg = compile_arg0(nid)
+        tmp = new_temp
+        itmp = new_temp
+        jtmp = new_temp
+        ktmp = new_temp
+        emit("  sp_FloatArray *" + tmp + " = sp_FloatArray_new();")
+        emit("  for (mrb_int " + itmp + " = 0; " + itmp + " < sp_FloatArray_length(" + rc + "); " + itmp + "++) {")
+        emit("    mrb_float _v = sp_FloatArray_get(" + rc + ", " + itmp + ");")
+        # == matches Ruby Float#eql? semantics (exact bitwise equality; NaN != NaN in both C and Ruby)
+        emit("    mrb_int _in_b = 0; for (mrb_int " + jtmp + " = 0; " + jtmp + " < sp_FloatArray_length(" + arg + "); " + jtmp + "++) { if (sp_FloatArray_get(" + arg + ", " + jtmp + ") == _v) { _in_b = 1; break; } }")
+        emit("    mrb_int _in_r = 0; for (mrb_int " + ktmp + " = 0; " + ktmp + " < sp_FloatArray_length(" + tmp + "); " + ktmp + "++) { if (sp_FloatArray_get(" + tmp + ", " + ktmp + ") == _v) { _in_r = 1; break; } }")
+        emit("    if (_in_b && !_in_r) sp_FloatArray_push(" + tmp + ", _v);")
+        emit("  }")
+        return tmp
+      end
     end
     if is_ptr_array_type(recv_type) == 1
       elem_type = ptr_array_elem_type(recv_type)
@@ -16293,6 +16330,17 @@ class Compiler
       end
       if mname == "count"
         return "sp_StrArray_length(" + rc + ")"
+      end
+      if mname == "intersection"
+        arg = compile_arg0(nid)
+        tmp = new_temp
+        itmp = new_temp
+        emit("  sp_StrArray *" + tmp + " = sp_StrArray_new();")
+        emit("  for (mrb_int " + itmp + " = 0; " + itmp + " < sp_StrArray_length(" + rc + "); " + itmp + "++) {")
+        emit("    const char *_v = sp_StrArray_get(" + rc + ", " + itmp + ");")
+        emit("    if (sp_StrArray_include(" + arg + ", _v) && !sp_StrArray_include(" + tmp + ", _v)) sp_StrArray_push(" + tmp + ", _v);")
+        emit("  }")
+        return tmp
       end
     end
 
