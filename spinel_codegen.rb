@@ -2984,6 +2984,13 @@ class Compiler
       end
       return ""
     end
+    if mname == "take_while" || mname == "drop_while"
+      if recv >= 0
+        rt = infer_type(recv)
+        return rt if rt == "int_array" || rt == "sym_array"
+      end
+      return ""
+    end
     ""
   end
 
@@ -17039,6 +17046,58 @@ class Compiler
           return tmp
         end
         return "sp_IntArray_sort(" + rc + ")"
+      end
+      # take_while / drop_while: block-driven prefix scan. take_while
+      # collects elements from the front while the block stays truthy;
+      # drop_while skips them and returns the rest. Mirrors the
+      # existing take/drop arms but with per-element block evaluation.
+      # `bp`'s C type and the metadata `declare_var` records both come
+      # from `elem_type_of_array(recv_type)` so sym_array gets `sp_sym`
+      # rather than a hardcoded `mrb_int`. Multi-stmt blocks compile
+      # preceding statements before extracting the predicate expr from
+      # the last — same shape as the partition arm.
+      if (mname == "take_while" || mname == "drop_while") && @nd_block[nid] >= 0
+        blk = @nd_block[nid]
+        bp = get_block_param(nid, 0)
+        if bp == ""
+          bp = "_x"
+        end
+        elem_t = elem_type_of_array(recv_type)
+        tmp = new_temp
+        itmp = new_temp
+        ktmp = new_temp
+        emit("  sp_IntArray *" + tmp + " = sp_IntArray_new();")
+        emit("  { mrb_int " + ktmp + " = sp_IntArray_length(" + rc + ");")
+        emit("    mrb_int " + itmp + " = 0;")
+        emit("    while (" + itmp + " < " + ktmp + ") {")
+        emit("      " + c_type(elem_t) + " lv_" + bp + " = sp_IntArray_get(" + rc + ", " + itmp + ");")
+        push_scope
+        declare_var(bp, elem_t)
+        bbody = @nd_body[blk]
+        bexpr = "0"
+        if bbody >= 0
+          bs = get_stmts(bbody)
+          if bs.length > 0
+            k = 0
+            while k < bs.length - 1
+              compile_stmt(bs[k])
+              k = k + 1
+            end
+            bexpr = compile_expr(bs.last)
+          end
+        end
+        emit("      if (!(" + bexpr + ")) break;")
+        if mname == "take_while"
+          emit("      sp_IntArray_push(" + tmp + ", lv_" + bp + ");")
+        end
+        emit("      " + itmp + "++;")
+        emit("    }")
+        if mname == "drop_while"
+          emit("    while (" + itmp + " < " + ktmp + ") { sp_IntArray_push(" + tmp + ", sp_IntArray_get(" + rc + ", " + itmp + ")); " + itmp + "++; }")
+        end
+        emit("  }")
+        pop_scope
+        return tmp
       end
       if mname == "first"
         return "sp_IntArray_get(" + rc + ", 0)"
