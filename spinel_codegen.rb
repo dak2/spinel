@@ -257,19 +257,15 @@ class Compiler
     # Module tracking: module_name -> body node id
     @module_names = "".split(",")
     @module_body_ids = []
-    # Module-level singleton accessors (issue #126, Stage 1):
+    # Module-level singleton accessors (issue #126):
     #   `class << self; attr_accessor :foo; end` inside `module M`.
-    # Stage 1 only supports the static-fold case: each accessor is
-    # written exactly once with a constant-resolvable RHS (typically a
-    # module name). The folded value at the (module, accessor) key is
-    # then substituted at read sites, so `M.foo.method` lowers via
-    # the existing module-class-method dispatch path on the resolved
-    # constant. Keys are "<Module>.<accessor>"; `@module_acc_const`
-    # holds the resolved constant name (a module/class name) or "" if
-    # unresolved (writes are non-constant or there are multiple
-    # writes).
+    # `@module_acc_consts[i]` is a `;`-separated list of distinct
+    # constant names assigned to this slot (Stage 1: single name →
+    # inline; Stage 2: multiple names → runtime sentinel switch).
+    # Empty string means at least one write was non-constant — the
+    # slot falls through to the un-folded path.
     @module_acc_keys = "".split(",")
-    @module_acc_const = "".split(",")
+    @module_acc_consts = "".split(",")
     @pending_method_ref = ""
     @lambda_counter = 0
     @lambda_funcs = ""
@@ -1734,22 +1730,35 @@ class Compiler
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
 
-    # Issue #126 Stage 1: `Module.accessor.<method>` resolves to
-    # `<ConstName>.<method>` via the constant fold. The return type
-    # needs the same substitution as the codegen path so `puts` and
-    # other typed dispatchers see the right type.
+    # Issue #126: chain return type for `Module.accessor.<method>`.
+    # All resolved candidates' class methods should agree on a return
+    # type; if they disagree the chain becomes poly. Returning early
+    # only when we have a confident answer means the existing
+    # operator/comparison/etc paths still get to chime in for shapes
+    # that don't match this chain.
     if recv >= 0 && @nd_type[recv] == "CallNode"
       inner_recv = @nd_receiver[recv]
       inner_mname = @nd_name[recv]
       if inner_recv >= 0 && @nd_type[inner_recv] == "ConstantReadNode"
         mod_name = @nd_name[inner_recv]
         if module_name_exists(mod_name) == 1
-          idx = find_module_acc_idx(mod_name + "." + inner_mname)
-          if idx >= 0 && @module_acc_const[idx] != ""
-            resolved = @module_acc_const[idx]
-            mi = find_method_idx(resolved + "_cls_" + mname)
-            if mi >= 0
-              return @meth_return_types[mi]
+          rconsts = module_acc_resolved(mod_name, inner_mname)
+          if rconsts != "" && rconsts != "?"
+            cands = rconsts.split(";")
+            common = ""
+            cands.each { |cn|
+              mi = find_method_idx(cn + "_cls_" + mname)
+              if mi >= 0
+                rt = @meth_return_types[mi]
+                if common == ""
+                  common = rt
+                elsif common != rt
+                  common = "poly"
+                end
+              end
+            }
+            if common != ""
+              return common
             end
           end
         end
@@ -4036,15 +4045,15 @@ class Compiler
     -1
   end
 
-  # Issue #126 Stage 1: walk the AST for `Module.accessor = RHS` writes
-  # where (Module, accessor) was registered in `collect_module` as a
-  # singleton accessor (`class << self; attr_accessor :accessor; end`).
-  # When every visible write resolves to the same ConstantReadNode (a
-  # module or class name), record that name; later read sites substitute
-  # the constant for the chained dispatch. Mixed / non-constant / multi-
-  # value writes leave the entry unresolved, and the read site falls
-  # through to the existing (currently-broken) path — Stage 2 will pick
-  # those up via runtime sentinel dispatch.
+  # Issue #126: walk the AST for `Module.accessor = RHS` writes where
+  # (Module, accessor) was registered in `collect_module` as a
+  # singleton accessor. Accumulate the set of distinct ConstantReadNode
+  # RHSes; the lowering paths read this list to choose:
+  #   - 0 entries: never written, falls through (un-folded)
+  #   - 1 entry:   Stage 1, inline `<resolved>.<method>` directly
+  #   - 2+ entries: Stage 2, sentinel switch over the union
+  # A non-constant RHS poisons the slot with a `?` sentinel marker —
+  # the lowering paths treat that as un-folded.
   def resolve_module_singleton_accessors
     if @module_acc_keys.length == 0
       return
@@ -4061,24 +4070,24 @@ class Compiler
               accessor = mname[0, mname.length - 1]
               key = mod_name + "." + accessor
               idx = find_module_acc_idx(key)
-              if idx >= 0
+              if idx >= 0 && @module_acc_consts[idx] != "?"
                 args_id = @nd_arguments[nid]
                 if args_id >= 0
                   arg_ids = get_args(args_id)
                   if arg_ids.length > 0 && @nd_type[arg_ids[0]] == "ConstantReadNode"
                     rhs_name = @nd_name[arg_ids[0]]
-                    cur = @module_acc_const[idx]
-                    if cur == ""
-                      @module_acc_const[idx] = rhs_name
-                    elsif cur != rhs_name
-                      # Multiple distinct constants → leave unresolved
-                      # by marking with a sentinel empty string. The
-                      # read site falls through to the un-folded path.
-                      @module_acc_const[idx] = ""
+                    cur = @module_acc_consts[idx]
+                    cur_list = cur.split(";")
+                    if not_in(rhs_name, cur_list) == 1
+                      if cur == ""
+                        @module_acc_consts[idx] = rhs_name
+                      else
+                        @module_acc_consts[idx] = cur + ";" + rhs_name
+                      end
                     end
                   else
-                    # Non-constant RHS: poisons the fold for this slot.
-                    @module_acc_const[idx] = ""
+                    # Non-constant RHS poisons the slot.
+                    @module_acc_consts[idx] = "?"
                   end
                 end
               end
@@ -4088,6 +4097,31 @@ class Compiler
       end
       nid = nid + 1
     end
+  end
+
+  # Returns the resolved constant list for this (module, accessor):
+  # `<Name1>;<Name2>;...` for foldable, `""` if never written, `"?"`
+  # if poisoned (non-constant RHS).
+  def module_acc_resolved(mod_name, accessor)
+    idx = find_module_acc_idx(mod_name + "." + accessor)
+    if idx < 0
+      return ""
+    end
+    @module_acc_consts[idx]
+  end
+
+  # Sentinel value for Stage 2 switch dispatch. Each module's index in
+  # `@module_names` doubles as its sentinel id; reading `Module` as a
+  # value lowers to this integer.
+  def module_sentinel(mname)
+    i = 0
+    while i < @module_names.length
+      if @module_names[i] == mname
+        return i + 1
+      end
+      i = i + 1
+    end
+    0
   end
 
   # Walk every class's parent chain. A cycle anywhere on the chain is
@@ -5631,7 +5665,7 @@ class Compiler
                   if @nd_type[aid] == "SymbolNode"
                     accessor = @nd_content[aid]
                     @module_acc_keys.push(mname + "." + accessor)
-                    @module_acc_const.push("")
+                    @module_acc_consts.push("")
                   end
                 }
               end
@@ -9954,6 +9988,30 @@ class Compiler
     if @const_names.length > 0
       emit_raw("")
     end
+    # Issue #126 Stage 2: storage for module-level singleton accessors
+    # whose resolved set has 2+ candidates. The slot stores the
+    # assigned module's sentinel (mrb_int from `module_sentinel`); the
+    # write site emits `slot = N;` and the chain dispatch reads back
+    # via a sentinel switch.
+    j = 0
+    emitted = 0
+    while j < @module_acc_keys.length
+      consts = @module_acc_consts[j]
+      if consts != "" && consts != "?" && consts.split(";").length > 1
+        key = @module_acc_keys[j]
+        # key shape is "<Mod>.<accessor>"; turn the dot into an
+        # underscore for the C identifier.
+        dot = key.index(".")
+        mod = key[0, dot]
+        acc = key[dot + 1, key.length - dot - 1]
+        emit_raw("static mrb_int sp_module_" + mod + "_" + sanitize_name(acc) + " = 0;")
+        emitted = 1
+      end
+      j = j + 1
+    end
+    if emitted == 1
+      emit_raw("")
+    end
   end
 
   def is_value_type_ivar(t)
@@ -14274,26 +14332,18 @@ class Compiler
     mname = @nd_name[nid]
     recv = @nd_receiver[nid]
 
-    # Issue #126 Stage 1: `Module.accessor.<method>` where
-    # (Module, accessor) was statically resolved by
-    # `resolve_module_singleton_accessors`. Substitute the resolved
-    # constant for the receiver and let the normal call dispatch handle
-    # the resulting `<Constant>.<method>` call. The substitution
-    # happens by synthesising a virtual ConstantReadNode-like dispatch
-    # in-place: we intercept at compile_call_expr's top, look at recv,
-    # and re-route through the resolved-constant call.
+    # Issue #126: `Module.accessor.<method>` where the slot was
+    # resolved by `resolve_module_singleton_accessors`. With a single
+    # constant in the resolved set, inline the call directly. With
+    # two or more, emit a sentinel-switch over the slot variable.
     if recv >= 0 && @nd_type[recv] == "CallNode"
       inner_recv = @nd_receiver[recv]
       inner_mname = @nd_name[recv]
       if inner_recv >= 0 && @nd_type[inner_recv] == "ConstantReadNode"
         mod_name = @nd_name[inner_recv]
         if module_name_exists(mod_name) == 1
-          idx = find_module_acc_idx(mod_name + "." + inner_mname)
-          if idx >= 0 && @module_acc_const[idx] != ""
-            resolved = @module_acc_const[idx]
-            # Build a temporary substitute receiver: a ConstantReadNode
-            # of the resolved name. Reusing alloc_node would mutate the
-            # AST, so instead we forge the call expression directly.
+          rconsts = module_acc_resolved(mod_name, inner_mname)
+          if rconsts != "" && rconsts != "?"
             args_id = @nd_arguments[nid]
             arg_strs = ""
             if args_id >= 0
@@ -14307,7 +14357,24 @@ class Compiler
                 k = k + 1
               end
             end
-            return "sp_" + resolved + "_cls_" + sanitize_name(mname) + "(" + arg_strs + ")"
+            cands = rconsts.split(";")
+            if cands.length == 1
+              return "sp_" + cands[0] + "_cls_" + sanitize_name(mname) + "(" + arg_strs + ")"
+            end
+            # Stage 2: sentinel switch. The slot stores the assigned
+            # module's sentinel; we walk the candidate list and dispatch
+            # the first match. Default `0` mirrors the un-initialised
+            # slot value (slot was zero-init, never written before read).
+            slot = "sp_module_" + mod_name + "_" + sanitize_name(inner_mname)
+            expr = "0"
+            ki = cands.length - 1
+            while ki >= 0
+              cn = cands[ki]
+              call_c = "sp_" + cn + "_cls_" + sanitize_name(mname) + "(" + arg_strs + ")"
+              expr = "((" + slot + " == " + module_sentinel(cn).to_s + ") ? " + call_c + " : " + expr + ")"
+              ki = ki - 1
+            end
+            return expr
           end
         end
       end
@@ -20711,16 +20778,31 @@ class Compiler
       return
     end
 
-    # Issue #126 Stage 1: `Module.accessor = X` where the entry was
-    # statically folded. The read sites substitute the constant, so
-    # the write side has nothing to emit.
+    # Issue #126: `Module.accessor = X` write.
+    #   Stage 1 (1 candidate): no emit; reads fold to that constant.
+    #   Stage 2 (2+ candidates): emit `slot = SP_MOD_<X>;` so the
+    #   read site's sentinel switch picks the right branch.
     if mname.length > 1 && mname[mname.length - 1] == "=" && recv >= 0 && @nd_type[recv] == "ConstantReadNode"
       mod_name = @nd_name[recv]
       if module_name_exists(mod_name) == 1
         accessor = mname[0, mname.length - 1]
-        idx = find_module_acc_idx(mod_name + "." + accessor)
-        if idx >= 0 && @module_acc_const[idx] != ""
-          return
+        rconsts = module_acc_resolved(mod_name, accessor)
+        if rconsts != "" && rconsts != "?"
+          cands = rconsts.split(";")
+          if cands.length == 1
+            return
+          end
+          # Stage 2: write the sentinel for the assigned module.
+          args_id2 = @nd_arguments[nid]
+          if args_id2 >= 0
+            ai = get_args(args_id2)
+            if ai.length > 0 && @nd_type[ai[0]] == "ConstantReadNode"
+              rhs = @nd_name[ai[0]]
+              slot = "sp_module_" + mod_name + "_" + sanitize_name(accessor)
+              emit("  " + slot + " = " + module_sentinel(rhs).to_s + ";")
+              return
+            end
+          end
         end
       end
     end
