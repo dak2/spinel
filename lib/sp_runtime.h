@@ -776,7 +776,14 @@ static mrb_int sp_catch_val[SP_CATCH_STACK_MAX];
 static volatile int sp_catch_top = 0;
 static void sp_throw(const char *tag, mrb_int val) { int i = sp_catch_top - 1; while (i >= 0) { if (strcmp(sp_catch_tag[i], tag) == 0) { sp_catch_val[i] = val; sp_catch_top = i + 1; longjmp(sp_catch_stack[i], 1); } i--; } fprintf(stderr, "uncaught throw: %s\n", tag); exit(1); }
 
-static const char *sp_file_read(const char *path) { FILE *f = fopen(path, "rb"); if (!f) return &("\xff" "")[1]; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); char *buf = sp_str_alloc(sz); if (sz > 0) { size_t r = fread(buf, 1, sz, f); (void)r; } buf[sz] = 0; fclose(f); return buf; }
+/* Text mode ("r") matches CRuby's File.read: on Windows, CRLF is
+   normalized to LF on read, which cancels out fopen("w")'s
+   LF→CRLF on write. Without this, content from File.read passed to
+   puts goes through stdout's text-mode translation a second time
+   and `\r\n` becomes `\r\r\n`. fread's actual byte count drives
+   null-termination because text mode shrinks the byte count below
+   ftell's raw-file size. */
+static const char *sp_file_read(const char *path) { FILE *f = fopen(path, "r"); if (!f) return &("\xff" "")[1]; fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); char *buf = sp_str_alloc(sz); size_t n = 0; if (sz > 0) { n = fread(buf, 1, sz, f); } buf[n] = 0; fclose(f); return buf; }
 static void sp_file_write(const char *path, const char *data) { FILE *f = fopen(path, "w"); if (f) { fputs(data, f); fclose(f); } }
 static mrb_bool sp_file_exist(const char *path) { FILE *f = fopen(path, "r"); if (f) { fclose(f); return TRUE; } return FALSE; }
 static void sp_file_delete(const char *path) { remove(path); }
