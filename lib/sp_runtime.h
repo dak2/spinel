@@ -179,8 +179,24 @@ static void sp_str_sweep(void) {
 
 #define SP_GC_STACK_MAX 65536
 static void **sp_gc_roots[SP_GC_STACK_MAX]; static int sp_gc_nroots = 0;
+/* GC root tracking. SP_GC_ROOT registers a stack-resident root with a
+   cleanup-attribute sentinel so it's auto-popped when its declaring
+   scope ends — matches the variable's actual lifetime, including for
+   temporaries declared inside nested if/while/for blocks. The previous
+   form (push to global array, paired with SP_GC_SAVE/RESTORE at
+   function entry) leaked roots whose stack memory was reclaimed when
+   inner blocks returned, which clang's stricter stack layout exposed
+   as use-after-scope on inputs that nest scan_locals deeply (issue
+   surfaced on test/block2.rb under clang-built spinel_codegen). */
+static inline int _sp_gc_root_push(void **p) {
+  if (sp_gc_nroots < SP_GC_STACK_MAX) { sp_gc_roots[sp_gc_nroots++] = p; return 1; }
+  return 0;
+}
+static inline void _sp_gc_root_pop(int *added) { if (*added) sp_gc_nroots--; }
+#define _SP_GC_CONCAT2(a,b) a##b
+#define _SP_GC_CONCAT(a,b) _SP_GC_CONCAT2(a,b)
 #define SP_GC_SAVE() int __attribute__((cleanup(sp_gc_cleanup))) _gc_saved = sp_gc_nroots
-#define SP_GC_ROOT(v) do{if(sp_gc_nroots<SP_GC_STACK_MAX)sp_gc_roots[sp_gc_nroots++]=(void**)&(v);}while(0)
+#define SP_GC_ROOT(v) int __attribute__((cleanup(_sp_gc_root_pop))) _SP_GC_CONCAT(_sp_gcr_, __COUNTER__) = _sp_gc_root_push((void**)&(v))
 #define SP_GC_RESTORE() sp_gc_nroots = _gc_saved
 #define SP_GC_MARK_STACK_MAX (1024*64)
 static void**sp_gc_mark_stack=NULL;static int sp_gc_mark_top=0;
