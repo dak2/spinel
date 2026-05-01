@@ -24319,6 +24319,26 @@ class Compiler
       @needs_rb_value = 1
       return "sp_poly_inspect(" + val + ")"
     end
+    # Nested arrays: only the four T_array element shapes that already
+    # have primitive inspect helpers (issue #169). Other ptr_array
+    # element types (obj_<C>, poly_array) fall through to the
+    # puts-style default — they're separate scope.
+    if at == "int_array_ptr_array"
+      @needs_int_array = 1
+      return "sp_IntArrayPtrArray_inspect(" + val + ")"
+    end
+    if at == "float_array_ptr_array"
+      @needs_float_array = 1
+      return "sp_FloatArrayPtrArray_inspect(" + val + ")"
+    end
+    if at == "str_array_ptr_array"
+      @needs_str_array = 1
+      return "sp_StrArrayPtrArray_inspect(" + val + ")"
+    end
+    if at == "sym_array_ptr_array"
+      @needs_int_array = 1
+      return "sp_SymArrayPtrArray_inspect(" + val + ")"
+    end
     ""
   end
 
