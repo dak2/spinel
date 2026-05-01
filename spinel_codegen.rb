@@ -12438,21 +12438,38 @@ class Compiler
         declare_method_locals(bid, pnames)
         stmts = get_stmts(bid)
         stmts.each { |sid|
-          if @nd_type[sid] == "SuperNode"
+          # Bare `super` parses as ForwardingSuperNode; `super(args)`
+          # parses as SuperNode. Both need to call the parent's
+          # initialize. For ForwardingSuperNode we forward the
+          # current method's params.
+          is_super = (@nd_type[sid] == "SuperNode" || @nd_type[sid] == "ForwardingSuperNode")
+          if is_super
             if @cls_parents[ci] != ""
               pi = find_class_idx(@cls_parents[ci])
               if pi >= 0
                 super_args = ""
-                args_id = @nd_arguments[sid]
-                if args_id >= 0
-                  arg_ids = get_args(args_id)
-                  ak = 0
-                  while ak < arg_ids.length
-                    if ak > 0
+                if @nd_type[sid] == "ForwardingSuperNode"
+                  # Forward the current init's params 1:1.
+                  fk = 0
+                  while fk < pnames.length
+                    if fk > 0
                       super_args = super_args + ", "
                     end
-                    super_args = super_args + compile_expr(arg_ids[ak])
-                    ak = ak + 1
+                    super_args = super_args + "lv_" + pnames[fk]
+                    fk = fk + 1
+                  end
+                else
+                  args_id = @nd_arguments[sid]
+                  if args_id >= 0
+                    arg_ids = get_args(args_id)
+                    ak = 0
+                    while ak < arg_ids.length
+                      if ak > 0
+                        super_args = super_args + ", "
+                      end
+                      super_args = super_args + compile_expr(arg_ids[ak])
+                      ak = ak + 1
+                    end
                   end
                 end
                 emit_raw("  sp_" + @cls_parents[ci] + "_initialize((sp_" + @cls_parents[ci] + " *)self" + (super_args != "" ? ", " + super_args : "") + ");")
@@ -12503,7 +12520,7 @@ class Compiler
               emit_raw("  " + self_arrow + ivar + " = " + val + ";")
             end
           else
-            if @nd_type[sid] != "SuperNode"
+            if is_super == false
               # Compile other statements (e.g., method calls like @arr[0] = val)
               compile_stmt(sid)
             end
