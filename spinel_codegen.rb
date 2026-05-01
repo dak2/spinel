@@ -19327,13 +19327,13 @@ class Compiler
     if at == "symbol"
       return "sp_box_sym(" + val + ")"
     end
-    if is_obj_type(at) == 1
-      cname = at[4, at.length - 4]
-      ci = find_class_idx(cname)
-      return "sp_box_obj(" + val + ", " + ci.to_s + ")"
-    end
     # Built-in pointer types: route through sp_box_obj with a reserved
-    # negative cls_id (SP_BUILTIN_*) so dispatch is uniform.
+    # negative cls_id (SP_BUILTIN_*) so dispatch is uniform. These
+    # checks run BEFORE is_obj_type because an `obj_X_ptr_array` type
+    # tag both starts with "obj_" and ends with "_ptr_array" — the
+    # is_obj_type branch would otherwise feed a "Foo_ptr_array" name
+    # to find_class_idx, get -1 (= SP_BUILTIN_INT_ARRAY by accident),
+    # and emit `sp_box_obj(p, -1)` which mis-tags the runtime value.
     if at == "int_array"
       return "sp_box_int_array(" + val + ")"
     end
@@ -19348,6 +19348,11 @@ class Compiler
     end
     if is_ptr_array_type(at) == 1
       return "sp_box_ptr_array(" + val + ")"
+    end
+    if is_obj_type(at) == 1
+      cname = at[4, at.length - 4]
+      ci = find_class_idx(cname)
+      return "sp_box_obj(" + val + ", " + ci.to_s + ")"
     end
     if at == "proc" || at == "lambda"
       return "sp_box_proc(" + val + ")"
