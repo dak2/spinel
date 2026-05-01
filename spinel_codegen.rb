@@ -21959,6 +21959,33 @@ class Compiler
         end
       end
     end
+    # $stdout.flush / $stderr.flush / STDOUT.flush / STDERR.flush.
+    # Important on Windows where stdio is fully-buffered when stdout
+    # is a pipe — without an explicit flush, output written via puts
+    # before a `system(...)` call appears after the child process's
+    # output. The expression-context system path already emits
+    # fflush(stdout) implicitly; this lets user code do the same
+    # explicitly.
+    if mname == "flush" && recv >= 0
+      stream = ""
+      if @nd_type[recv] == "GlobalVariableReadNode"
+        if @nd_name[recv] == "$stdout"
+          stream = "stdout"
+        elsif @nd_name[recv] == "$stderr"
+          stream = "stderr"
+        end
+      elsif @nd_type[recv] == "ConstantReadNode"
+        if @nd_name[recv] == "STDOUT"
+          stream = "stdout"
+        elsif @nd_name[recv] == "STDERR"
+          stream = "stderr"
+        end
+      end
+      if stream != ""
+        emit("  fflush(" + stream + ");")
+        return 1
+      end
+    end
     if mname == "print"
       if recv < 0
         compile_print(nid)
