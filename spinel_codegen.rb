@@ -21484,16 +21484,26 @@ class Compiler
       if @nd_type[eid] == "SplatNode"
         inner = @nd_expression[eid]
         it = infer_type(inner)
+        # Root tmp so a sp_IntArray_push grow inside the splat loop
+        # can't sweep the half-built array. Hoist range / source
+        # expressions to a temp so side effects (method calls in the
+        # bound, chained recv) fire exactly once.
+        emit("  SP_GC_ROOT(" + tmp + ");")
         if @nd_type[inner] == "RangeNode"
           lo = compile_expr(@nd_left[inner])
-          hi = compile_expr(@nd_right[inner])
+          hi_expr = compile_expr(@nd_right[inner])
+          hi = new_temp
+          emit("  mrb_int " + hi + " = " + hi_expr + ";")
           cmp = range_excl_end(inner) == 1 ? "<" : "<="
           ii = new_temp
           emit("  for (mrb_int " + ii + " = " + lo + "; " + ii + " " + cmp + " " + hi + "; " + ii + "++) {")
           emit("    sp_IntArray_push(" + tmp + ", " + ii + ");")
           emit("  }")
-        elsif it == "int_array"
-          src = compile_expr(inner)
+        elsif it == "int_array" || it == "sym_array"
+          src_expr = compile_expr(inner)
+          src = new_temp
+          emit("  sp_IntArray *" + src + " = " + src_expr + ";")
+          emit("  SP_GC_ROOT(" + src + ");")
           ii = new_temp
           emit("  for (mrb_int " + ii + " = 0; " + ii + " < sp_IntArray_length(" + src + "); " + ii + "++) {")
           emit("    sp_IntArray_push(" + tmp + ", sp_IntArray_get(" + src + ", " + ii + "));")
@@ -26981,6 +26991,14 @@ class Compiler
       else
         emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
       end
+      # Walk through ParenthesesNode wrappers to find a literal
+      # RangeNode (so we can read its exclude_end flag and its raw
+      # endpoint expressions). If the receiver is a variable holding
+      # a Range — `r = 1..3; r.map {...}` — there's no AST RangeNode
+      # to consult, so fall back to the runtime sp_Range value held
+      # by `rc` and conservatively treat the range as inclusive
+      # (sp_Range doesn't track exclude_end at runtime; see the same
+      # limitation at the .each / .step paths).
       rng_id = @nd_receiver[nid]
       while rng_id >= 0 && @nd_type[rng_id] == "ParenthesesNode"
         body_pn = @nd_body[rng_id]
@@ -26995,9 +27013,17 @@ class Compiler
           rng_id = -1
         end
       end
-      first_e = compile_expr(@nd_left[rng_id])
-      last_e = compile_expr(@nd_right[rng_id])
-      excl = range_excl_end(rng_id) == 1 ? "<" : "<="
+      if rng_id >= 0 && @nd_type[rng_id] == "RangeNode"
+        first_e = compile_expr(@nd_left[rng_id])
+        last_e = compile_expr(@nd_right[rng_id])
+        excl = range_excl_end(rng_id) == 1 ? "<" : "<="
+      else
+        rng_tmp = new_temp
+        emit("  sp_Range " + rng_tmp + " = " + rc + ";")
+        first_e = rng_tmp + ".first"
+        last_e = rng_tmp + ".last"
+        excl = "<="
+      end
       emit("  for (mrb_int " + tmp_i + " = " + first_e + "; " + tmp_i + " " + excl + " " + last_e + "; " + tmp_i + "++) {")
       have_bp_r = (get_block_param(nid, 0) != "")
       if have_bp_r

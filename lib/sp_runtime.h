@@ -852,10 +852,11 @@ static sp_IntArray *sp_file_binread_bytes(const char *path) {
   long sz = ftell(f);
   fseek(f, 0, SEEK_SET);
   unsigned char *buf = (unsigned char *)malloc(sz > 0 ? (size_t)sz : 1);
-  if (sz > 0) {
-    size_t r = fread(buf, 1, sz, f);
-    (void)r;
-    for (long i = 0; i < sz; i++) sp_IntArray_push(a, (mrb_int)buf[i]);
+  if (buf && sz > 0) {
+    /* Use fread's actual byte count, not the raw file size — a
+       partial read otherwise pushes uninitialized memory. */
+    size_t r = fread(buf, 1, (size_t)sz, f);
+    for (size_t i = 0; i < r; i++) sp_IntArray_push(a, (mrb_int)buf[i]);
   }
   free(buf);
   fclose(f);
