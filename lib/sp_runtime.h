@@ -783,6 +783,28 @@ static void sp_file_delete(const char *path) { remove(path); }
 static const char *sp_backtick(const char *cmd) { FILE *p = popen(cmd, "r"); if (!p) return sp_str_empty; char *buf = sp_str_alloc_raw(4096); size_t n = fread(buf, 1, 4095, p); buf[n] = 0; pclose(p); return buf; }
 static const char *sp_file_basename(const char *path) { const char *s = strrchr(path, '/'); if (s) return s + 1; return path; }
 
+/* Read a file's bytes into a fresh IntArray. Distinct from
+   `sp_str_bytes(sp_file_read(path))` because plain sp_str_bytes uses
+   null-termination and stops at the first 0x00 byte — wrong for
+   binary data (e.g. .nes ROM files). */
+static sp_IntArray *sp_file_binread_bytes(const char *path) {
+  FILE *f = fopen(path, "rb");
+  sp_IntArray *a = sp_IntArray_new();
+  if (!f) return a;
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  unsigned char *buf = (unsigned char *)malloc(sz > 0 ? (size_t)sz : 1);
+  if (sz > 0) {
+    size_t r = fread(buf, 1, sz, f);
+    (void)r;
+    for (long i = 0; i < sz; i++) sp_IntArray_push(a, (mrb_int)buf[i]);
+  }
+  free(buf);
+  fclose(f);
+  return a;
+}
+
 typedef struct sp_Proc { void *fn; void *cap; void (*cap_scan)(void *); } sp_Proc;
 static void sp_Proc_scan(void *p) { sp_Proc *pr = (sp_Proc *)p; if (pr->cap && pr->cap_scan) pr->cap_scan(pr->cap); }
 static sp_Proc *sp_proc_new(void *fn, void *cap, void (*cap_scan)(void *)) { sp_Proc *p = (sp_Proc *)sp_gc_alloc(sizeof(sp_Proc), NULL, sp_Proc_scan); p->fn = fn; p->cap = cap; p->cap_scan = cap_scan; return p; }
