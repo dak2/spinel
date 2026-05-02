@@ -17,7 +17,12 @@ CC       ?= cc
 # doesn't have that warning; without `-Wno-unknown-warning-option`
 # first, clang would turn the unknown -Wno- into a -Werror failure on
 # every cc invocation in `make test` / `make bench`.
-CFLAGS   = -O2 -Wno-all -Wno-unknown-warning-option -Wno-alloc-size-larger-than
+# Optimization level for the C compiles driven by the test/bench
+# harness (each .rb gets parsed → codegen → cc'd → run). CI overrides
+# this to -O0 to cut Windows cc time substantially; locally -O2 keeps
+# the test binaries reasonable-speed for quicker run-after-compile.
+OPT     ?= -O2
+CFLAGS   = $(OPT) -Wno-all -Wno-unknown-warning-option -Wno-alloc-size-larger-than
 # Bootstrap-only flags: spinel_codegen runs on the developer's machine
 # only, so we can use -O3 -flto for ~5-10% extra wall-clock without
 # constraining users (whose generated C is built with plain CFLAGS).
