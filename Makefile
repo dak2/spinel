@@ -232,7 +232,7 @@ build/test-results/%.ok: test/%.rb spinel_parse$(EXE) $(SP_RT_LIB) spinel_codege
 	$(CC) $(CFLAGS) -Werror $(SEC_FLAGS) -Ilib "$$cfile" $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o "$$bin" 2>/dev/null; \
 	if [ $$? -eq 0 ]; then \
 	  if [ -f "$<.expected" ]; then \
-	    cp "$<.expected" "$$exp.n"; \
+	    LC_ALL=C sed 's/\r$$//' "$<.expected" >"$$exp.n"; \
 	  else \
 	    $(TIMEOUT10) $(REF_RUBY) "$<" >"$$exp" 2>/dev/null; \
 	    ruby_rc=$$?; \
