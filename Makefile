@@ -190,9 +190,13 @@ bootstrap: spinel_codegen$(EXE)
 
 test: spinel_parse$(EXE) $(SP_RT_LIB) spinel_codegen$(EXE)
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
-	@pass=0; fail=0; err=0; \
+	@total=$$(ls test/*.rb | wc -l); \
+	if [ -t 1 ]; then tty=1; else tty=0; fi; \
+	pass=0; fail=0; err=0; i=0; \
 	for f in test/*.rb; do \
+	  i=$$((i+1)); \
 	  bn=$$(basename "$$f" .rb); \
+	  if [ "$$tty" = 1 ]; then printf '\r\033[K  [%d/%d] %s' "$$i" "$$total" "$$bn"; fi; \
 	  ./spinel_parse$(EXE) "$$f" /tmp/_sp_t.ast 2>/dev/null && \
 	  ./spinel_codegen$(EXE) /tmp/_sp_t.ast /tmp/_sp_t.c 2>/dev/null && \
 	  $(CC) $(CFLAGS) -Werror $(SEC_FLAGS) -Ilib /tmp/_sp_t.c $(SP_RT_LIB) $(LDFLAGS) -lm $(GC_FLAGS) -o /tmp/_sp_t_bin$(EXE) 2>/dev/null; \
@@ -207,14 +211,17 @@ test: spinel_parse$(EXE) $(SP_RT_LIB) spinel_codegen$(EXE)
 	    if [ "$$expected" = "$$actual" ]; then \
 	      pass=$$((pass+1)); \
 	    else \
+	      if [ "$$tty" = 1 ]; then printf '\r\033[K'; fi; \
 	      echo "FAIL: $$bn"; \
 	      printf '%s\n%s\n%s\n%s\n' "--- expected ---" "$$expected" "--- actual ---" "$$actual"; \
 	      fail=$$((fail+1)); \
 	    fi; \
 	  else \
+	    if [ "$$tty" = 1 ]; then printf '\r\033[K'; fi; \
 	    echo "ERR:  $$bn"; err=$$((err+1)); \
 	  fi; \
 	done; \
+	if [ "$$tty" = 1 ]; then printf '\r\033[K'; fi; \
 	rm -f /tmp/_sp_t.ast /tmp/_sp_t.c /tmp/_sp_t_bin$(EXE); \
 	echo "Tests: $$pass pass, $$fail fail, $$err error"; \
 	if [ $$fail -ne 0 ] || [ $$err -ne 0 ]; then exit 1; fi
