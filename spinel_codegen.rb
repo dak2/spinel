@@ -22953,8 +22953,17 @@ class Compiler
       k = 0
       while k < targets.length
         tid = targets[k]
+        rhs = "sp_IntArray_get(" + tmp + ", " + k.to_s + ")"
         if @nd_type[tid] == "LocalVariableTargetNode"
-          emit("  " + fiber_var_ref(@nd_name[tid]) + " = sp_IntArray_get(" + tmp + ", " + k.to_s + ");")
+          emit("  " + fiber_var_ref(@nd_name[tid]) + " = " + rhs + ";")
+        end
+        if @nd_type[tid] == "InstanceVariableTargetNode"
+          emit("  " + self_arrow + sanitize_ivar(@nd_name[tid]) + " = " + rhs + ";")
+        end
+        if @nd_type[tid] == "ConstantTargetNode"
+          if find_const_idx(@nd_name[tid]) >= 0
+            emit("  cst_" + @nd_name[tid] + " = " + rhs + ";")
+          end
         end
         k = k + 1
       end
