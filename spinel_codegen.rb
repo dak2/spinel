@@ -4238,6 +4238,22 @@ class Compiler
     0
   end
 
+  def is_hash_type(t)
+    if is_nullable_type(t) == 1
+      t = base_type(t)
+    end
+    if t == "str_int_hash" || t == "str_str_hash" || t == "int_str_hash"
+      return 1
+    end
+    if t == "sym_int_hash" || t == "sym_str_hash"
+      return 1
+    end
+    if t == "str_poly_hash" || t == "sym_poly_hash"
+      return 1
+    end
+    0
+  end
+
   # Set the right @needs_<runtime> flag for the given array type.
   def mark_array_runtime_needs(t)
     if t == "float_array"
@@ -6688,6 +6704,30 @@ class Compiler
       end
       @needs_rb_value = 1
       return "poly_array"
+    end
+    # Hash variants: empty-default str_int_hash (from `attrs = {}`)
+    # is type-flexible — let the call-site type win, same as the
+    # int_array → typed-array escalation above. Issue #176. The
+    # poly variants subsume any other hash; mismatched concrete
+    # hash types (str_int_hash vs sym_str_hash) fall through to
+    # the "incompatible → poly" tail.
+    if is_hash_type(old_pt) == 1 && is_hash_type(at) == 1
+      if old_pt == "str_poly_hash" || at == "str_poly_hash"
+        @needs_str_poly_hash = 1
+        @needs_rb_value = 1
+        return "str_poly_hash"
+      end
+      if old_pt == "sym_poly_hash" || at == "sym_poly_hash"
+        @needs_sym_poly_hash = 1
+        @needs_rb_value = 1
+        return "sym_poly_hash"
+      end
+      if old_pt == "str_int_hash"
+        return at
+      end
+      if at == "str_int_hash"
+        return old_pt
+      end
     end
     if at == "int"
       # Numeric compat: int + float is safe in both directions.
