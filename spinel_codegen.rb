@@ -26950,6 +26950,25 @@ class Compiler
     tmp_arr
   end
 
+  # Issue #210 follow-up: an empty `map {}` block yields nil per
+  # iteration in CRuby — the result array's length still matches the
+  # receiver. Without an explicit push the typed accumulator stays
+  # short and downstream `.length` / `[i]` on the result is wrong.
+  # Push a type-appropriate default (0 / 0.0 / "" / sp_box_nil) so
+  # length is preserved across all map dispatches.
+  def emit_map_default_push(target, container_type)
+    if container_type == "str_array"
+      emit("  sp_StrArray_push(" + target + ", \"\");")
+    elsif container_type == "float_array"
+      emit("  sp_FloatArray_push(" + target + ", 0.0);")
+    elsif container_type == "poly_array"
+      @needs_rb_value = 1
+      emit("  sp_PolyArray_push(" + target + ", sp_box_nil());")
+    else
+      emit("  sp_IntArray_push(" + target + ", 0);")
+    end
+  end
+
   def compile_map_expr(nid)
     # N.times.map { |i| ... } -> loop 0..N-1 building an array
     recv_n = @nd_receiver[nid]
@@ -26995,23 +27014,24 @@ class Compiler
       @indent = @indent + 1
       if blk_n >= 0
         body_n2 = @nd_body[blk_n]
-        if body_n2 >= 0
-          stmts_n2 = get_stmts(body_n2)
-          if stmts_n2.length > 0
-            k = 0
-            while k < stmts_n2.length - 1
-              compile_stmt(stmts_n2[k])
-              k = k + 1
-            end
-            lastv = compile_expr(stmts_n2.last)
-            if res_type == "string"
-              emit("  sp_StrArray_push(" + tmp_arrn + ", " + lastv + ");")
-            elsif res_type == "float"
-              emit("  sp_FloatArray_push(" + tmp_arrn + ", " + lastv + ");")
-            else
-              emit("  sp_IntArray_push(" + tmp_arrn + ", " + lastv + ");")
-            end
+        stmts_n2 = body_n2 >= 0 ? get_stmts(body_n2) : []
+        n_container = res_type == "string" ? "str_array" : (res_type == "float" ? "float_array" : "int_array")
+        if stmts_n2.length > 0
+          k = 0
+          while k < stmts_n2.length - 1
+            compile_stmt(stmts_n2[k])
+            k = k + 1
           end
+          lastv = compile_expr(stmts_n2.last)
+          if res_type == "string"
+            emit("  sp_StrArray_push(" + tmp_arrn + ", " + lastv + ");")
+          elsif res_type == "float"
+            emit("  sp_FloatArray_push(" + tmp_arrn + ", " + lastv + ");")
+          else
+            emit("  sp_IntArray_push(" + tmp_arrn + ", " + lastv + ");")
+          end
+        else
+          emit_map_default_push(tmp_arrn, n_container)
         end
       end
       @indent = @indent - 1
@@ -27116,23 +27136,24 @@ class Compiler
       @indent = @indent + 1
       if blk_r >= 0
         body_r2 = @nd_body[blk_r]
-        if body_r2 >= 0
-          stmts_r2 = get_stmts(body_r2)
-          k_r = 0
-          while k_r < stmts_r2.length - 1
-            compile_stmt(stmts_r2[k_r])
-            k_r = k_r + 1
+        stmts_r2 = body_r2 >= 0 ? get_stmts(body_r2) : []
+        r_container = block_ret_r == "string" ? "str_array" : (block_ret_r == "float" ? "float_array" : "int_array")
+        k_r = 0
+        while k_r < stmts_r2.length - 1
+          compile_stmt(stmts_r2[k_r])
+          k_r = k_r + 1
+        end
+        if stmts_r2.length > 0
+          lastv_r = compile_expr(stmts_r2.last)
+          if block_ret_r == "string"
+            emit("  sp_StrArray_push(" + tmp_arr + ", " + lastv_r + ");")
+          elsif block_ret_r == "float"
+            emit("  sp_FloatArray_push(" + tmp_arr + ", " + lastv_r + ");")
+          else
+            emit("  sp_IntArray_push(" + tmp_arr + ", " + lastv_r + ");")
           end
-          if stmts_r2.length > 0
-            lastv_r = compile_expr(stmts_r2.last)
-            if block_ret_r == "string"
-              emit("  sp_StrArray_push(" + tmp_arr + ", " + lastv_r + ");")
-            elsif block_ret_r == "float"
-              emit("  sp_FloatArray_push(" + tmp_arr + ", " + lastv_r + ");")
-            else
-              emit("  sp_IntArray_push(" + tmp_arr + ", " + lastv_r + ");")
-            end
-          end
+        else
+          emit_map_default_push(tmp_arr, r_container)
         end
       end
       @indent = @indent - 1
@@ -27208,13 +27229,13 @@ class Compiler
         blk2 = @nd_block[nid]
         if blk2 >= 0
           body3 = @nd_body[blk2]
-          if body3 >= 0
-            stmts3 = get_stmts(body3)
-            if stmts3.length > 0
-              last = stmts3[stmts3.length - 1]
-              val = compile_expr(last)
-              emit("  sp_StrArray_push(" + tmp_arr + ", " + val + ");")
-            end
+          stmts3 = body3 >= 0 ? get_stmts(body3) : []
+          if stmts3.length > 0
+            last = stmts3[stmts3.length - 1]
+            val = compile_expr(last)
+            emit("  sp_StrArray_push(" + tmp_arr + ", " + val + ");")
+          else
+            emit_map_default_push(tmp_arr, "str_array")
           end
         end
         @indent = @indent - 1
@@ -27234,13 +27255,13 @@ class Compiler
         blk2 = @nd_block[nid]
         if blk2 >= 0
           body3 = @nd_body[blk2]
-          if body3 >= 0
-            stmts3 = get_stmts(body3)
-            if stmts3.length > 0
-              last = stmts3[stmts3.length - 1]
-              val = compile_expr(last)
-              emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
-            end
+          stmts3 = body3 >= 0 ? get_stmts(body3) : []
+          if stmts3.length > 0
+            last = stmts3[stmts3.length - 1]
+            val = compile_expr(last)
+            emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
+          else
+            emit_map_default_push(tmp_arr, "int_array")
           end
         end
         @indent = @indent - 1
@@ -27280,17 +27301,17 @@ class Compiler
         @indent = @indent + 1
         if blk >= 0
           body3 = @nd_body[blk]
-          if body3 >= 0
-            stmts3 = get_stmts(body3)
-            if stmts3.length > 0
-              k = 0
-              while k < stmts3.length - 1
-                compile_stmt(stmts3[k])
-                k = k + 1
-              end
-              val = compile_expr(stmts3.last)
-              emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
+          stmts3 = body3 >= 0 ? get_stmts(body3) : []
+          if stmts3.length > 0
+            k = 0
+            while k < stmts3.length - 1
+              compile_stmt(stmts3[k])
+              k = k + 1
             end
+            val = compile_expr(stmts3.last)
+            emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
+          else
+            emit_map_default_push(tmp_arr, "int_array")
           end
         end
         @indent = @indent - 1
@@ -27307,17 +27328,17 @@ class Compiler
       @indent = @indent + 1
       if blk >= 0
         body3 = @nd_body[blk]
-        if body3 >= 0
-          stmts3 = get_stmts(body3)
-          if stmts3.length > 0
-            k = 0
-            while k < stmts3.length - 1
-              compile_stmt(stmts3[k])
-              k = k + 1
-            end
-            val = compile_expr(stmts3.last)
-            emit("  sp_StrArray_push(" + tmp_arr + ", " + val + ");")
+        stmts3 = body3 >= 0 ? get_stmts(body3) : []
+        if stmts3.length > 0
+          k = 0
+          while k < stmts3.length - 1
+            compile_stmt(stmts3[k])
+            k = k + 1
           end
+          val = compile_expr(stmts3.last)
+          emit("  sp_StrArray_push(" + tmp_arr + ", " + val + ");")
+        else
+          emit_map_default_push(tmp_arr, "str_array")
         end
       end
       @indent = @indent - 1
@@ -27332,7 +27353,11 @@ class Compiler
     # `.length` / `[i]` on the typed accumulator dereferences NULL.
     if rt == "poly_array"
       @needs_gc = 1
-      block_ret_p = "int"
+      # Empty / missing block leaves block_ret_p as "" so the
+      # accumulator falls into the catch-all PolyArray branch —
+      # matches infer_type's "poly_array" prediction for
+      # poly_array.map with no expression in the block.
+      block_ret_p = ""
       blk_p = @nd_block[nid]
       if blk_p >= 0
         body_p = @nd_body[blk_p]
@@ -27362,29 +27387,33 @@ class Compiler
       emit("  SP_GC_ROOT(" + tmp_arr + ");")
       emit("  for (mrb_int " + tmp_i + " = 0; " + tmp_i + " < sp_PolyArray_length(" + rc + "); " + tmp_i + "++) {")
       declare_var(bp1, "poly")
-      emit("    lv_" + bp1 + " = sp_PolyArray_get(" + rc + ", " + tmp_i + ");")
+      # Inline C declaration (shadows any outer lv_<bp1>) — covers
+      # the synthetic `_x` placeholder when the block has no param,
+      # which has no spinel-side declaration to reach this scope.
+      emit("    sp_RbVal lv_" + bp1 + " = sp_PolyArray_get(" + rc + ", " + tmp_i + ");")
       @indent = @indent + 1
       if blk_p >= 0
         body_p2 = @nd_body[blk_p]
-        if body_p2 >= 0
-          stmts_p2 = get_stmts(body_p2)
-          k_p = 0
-          while k_p < stmts_p2.length - 1
-            compile_stmt(stmts_p2[k_p])
-            k_p = k_p + 1
+        stmts_p2 = body_p2 >= 0 ? get_stmts(body_p2) : []
+        p_container = (block_ret_p == "string") ? "str_array" : ((block_ret_p == "float") ? "float_array" : ((block_ret_p == "int" || block_ret_p == "bool") ? "int_array" : "poly_array"))
+        k_p = 0
+        while k_p < stmts_p2.length - 1
+          compile_stmt(stmts_p2[k_p])
+          k_p = k_p + 1
+        end
+        if stmts_p2.length > 0
+          lastv_p = compile_expr(stmts_p2.last)
+          if block_ret_p == "string"
+            emit("  sp_StrArray_push(" + tmp_arr + ", " + lastv_p + ");")
+          elsif block_ret_p == "float"
+            emit("  sp_FloatArray_push(" + tmp_arr + ", " + lastv_p + ");")
+          elsif block_ret_p == "int" || block_ret_p == "bool"
+            emit("  sp_IntArray_push(" + tmp_arr + ", " + lastv_p + ");")
+          else
+            emit("  sp_PolyArray_push(" + tmp_arr + ", " + box_value_to_poly(block_ret_p, lastv_p) + ");")
           end
-          if stmts_p2.length > 0
-            lastv_p = compile_expr(stmts_p2.last)
-            if block_ret_p == "string"
-              emit("  sp_StrArray_push(" + tmp_arr + ", " + lastv_p + ");")
-            elsif block_ret_p == "float"
-              emit("  sp_FloatArray_push(" + tmp_arr + ", " + lastv_p + ");")
-            elsif block_ret_p == "int" || block_ret_p == "bool"
-              emit("  sp_IntArray_push(" + tmp_arr + ", " + lastv_p + ");")
-            else
-              emit("  sp_PolyArray_push(" + tmp_arr + ", " + box_value_to_poly(block_ret_p, lastv_p) + ");")
-            end
-          end
+        else
+          emit_map_default_push(tmp_arr, p_container)
         end
       end
       @indent = @indent - 1
