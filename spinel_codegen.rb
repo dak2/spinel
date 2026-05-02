@@ -159,6 +159,15 @@ class Compiler
     @scope_names = "".split(",")
     @scope_types = "".split(",")
 
+    # Issue #207: type narrowing introduced by `is_a?`/`kind_of?`
+    # guards. While walking the then-arm of `if v.is_a?(Hash)` or
+    # the truthy branch of `v.is_a?(Hash) ? a : b`, we push the
+    # narrowed `(var_name, narrowed_type)` here; find_var_type's
+    # top-down lookup picks it up and infer_type / scan / codegen
+    # see the narrowed type without per-pass plumbing.
+    @type_narrow_names = "".split(",")
+    @type_narrow_types = "".split(",")
+
     @current_class_idx = -1
     @current_method_name = ""
     @current_lexical_scope = ""
@@ -1106,6 +1115,16 @@ class Compiler
   end
 
   def find_var_type(name)
+    # Type-narrow override (issue #207): walk top-down so the
+    # innermost is_a? guard wins. Skipped for the unscoped global
+    # call (e.g. ivar lookups) — narrows are about local var typing.
+    i = @type_narrow_names.length - 1
+    while i >= 0
+      if @type_narrow_names[i] == name
+        return @type_narrow_types[i]
+      end
+      i = i - 1
+    end
     i = @scope_names.length - 1
     while i >= 0
       if @scope_names[i] == name
@@ -1114,6 +1133,256 @@ class Compiler
       i = i - 1
     end
     ""
+  end
+
+  # ---- is_a? type narrowing ----
+  # Issue #207: `<expr>.is_a?(<Class>)` (or kind_of?) used as the
+  # predicate of an if / ternary lets us treat <expr> as <Class>'s
+  # type inside the then-arm. The four entry points (push, pop,
+  # narrow_type_for_class, parse_is_a_predicate) are called from
+  # both inference and codegen sides — keep the API tiny so the
+  # narrow context can be plumbed through without leaking state.
+
+  def push_type_narrow(var_name, narrow_type)
+    @type_narrow_names.push(var_name)
+    @type_narrow_types.push(narrow_type)
+  end
+
+  def pop_type_narrow
+    @type_narrow_names.pop
+    @type_narrow_types.pop
+  end
+
+  # Map a Ruby class name to spinel's static type tag for narrowing.
+  # Returns "" when the class doesn't have a concrete spinel type
+  # we can narrow to (and the call site should leave the var type
+  # alone). The first set is concrete primitives — narrow gives a
+  # real type win. The Hash / Array group widens to the catch-all
+  # poly_* variant since spinel doesn't track a single "any hash"
+  # type, but `poly_hash` / `poly_array` reaches every receiver-
+  # method dispatch the narrowed var participates in.
+  def narrow_type_for_class(cname)
+    if cname == "Symbol"
+      return "symbol"
+    end
+    if cname == "Integer" || cname == "Numeric"
+      return "int"
+    end
+    if cname == "Float"
+      return "float"
+    end
+    if cname == "String"
+      return "string"
+    end
+    if cname == "TrueClass" || cname == "FalseClass"
+      return "bool"
+    end
+    if cname == "NilClass"
+      return "nil"
+    end
+    # Hash / Array narrow intentionally omitted: spinel has many
+    # concrete hash/array variants (sym_int_hash, str_str_hash,
+    # int_array, ...) and no single "any hash" type that supports
+    # iteration. Narrowing to a generic "poly_hash" widens callee
+    # params via unify_call_types to "poly", which makes the body's
+    # `each` loop drop out (no overload for poly recv). The
+    # symbolize_keys-style recursive repro in #207 hits this: better
+    # to leave the C compile error visible than emit a silently-
+    # empty body. Concrete-class narrow (Symbol, Integer, ...)
+    # below is unaffected.
+    if cname == "Proc"
+      return "proc"
+    end
+    if cname == "Range"
+      return "range"
+    end
+    # User-defined class: narrow to obj_<C> when the class is
+    # registered. Otherwise return "" — narrow is a no-op.
+    if find_class_idx(cname) >= 0
+      return "obj_" + cname
+    end
+    ""
+  end
+
+  # Issue #207: static evaluation of `<expr>.is_a?(<Class>)` /
+  # `.kind_of?(<Class>)` when expr's static type already proves the
+  # answer. Returns "TRUE" / "FALSE" / "" (= dynamic). Used at
+  # IfNode emit sites to skip the dead arm so the C compiler doesn't
+  # type-check a recursion call whose argument types don't match.
+  def static_is_a_value(pred_id)
+    if pred_id < 0
+      return ""
+    end
+    if @nd_type[pred_id] != "CallNode"
+      return ""
+    end
+    pname = @nd_name[pred_id]
+    if pname != "is_a?" && pname != "kind_of?"
+      return ""
+    end
+    expr = @nd_receiver[pred_id]
+    if expr < 0
+      return ""
+    end
+    args = @nd_arguments[pred_id]
+    if args < 0
+      return ""
+    end
+    arg_ids = get_args(args)
+    if arg_ids.length < 1
+      return ""
+    end
+    arg0 = arg_ids[0]
+    cname = ""
+    if @nd_type[arg0] == "ConstantReadNode"
+      cname = @nd_name[arg0]
+    elsif @nd_type[arg0] == "ConstantPathNode"
+      cname = resolve_const_ref_name(arg0)
+    end
+    if cname == ""
+      return ""
+    end
+    expr_t = infer_type(expr)
+    is_a_static_eval(expr_t, cname)
+  end
+
+  def is_a_static_eval(expr_t, cname)
+    eb = base_type(expr_t)
+    if eb == "poly"
+      return ""
+    end
+    # Concrete primitives: positive answer wins, otherwise narrow
+    # to the right tag.
+    if cname == "Symbol"
+      if eb == "symbol"
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "String"
+      if eb == "string" || eb == "mutable_str"
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "Integer" || cname == "Numeric"
+      if eb == "int"
+        return "TRUE"
+      end
+      if cname == "Numeric" && eb == "float"
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "Float"
+      if eb == "float"
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "TrueClass" || cname == "FalseClass"
+      if eb == "bool"
+        return ""  # value-dependent, leave dynamic
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "NilClass"
+      if eb == "nil"
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "Hash"
+      if is_hash_type(eb) == 1
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "Array"
+      if is_array_type(eb) == 1
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "Proc"
+      if eb == "proc" || eb == "lambda"
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    if cname == "Range"
+      if eb == "range"
+        return "TRUE"
+      end
+      return is_a_static_negative(eb)
+    end
+    # User-defined class
+    if find_class_idx(cname) >= 0
+      if is_obj_type(eb) == 1
+        ecname = eb[4, eb.length - 4]
+        if is_class_or_ancestor(ecname, cname) == 1
+          return "TRUE"
+        end
+        return "FALSE"
+      end
+      return is_a_static_negative(eb)
+    end
+    ""
+  end
+
+  # When the receiver's static type is a non-poly concrete tag, we
+  # can safely declare any non-matching is_a? as FALSE. Used by the
+  # primitive class branches above.
+  def is_a_static_negative(eb)
+    if eb == "poly" || eb == ""
+      return ""
+    end
+    "FALSE"
+  end
+
+  # Decode `<expr>.is_a?(<Class>)` / `.kind_of?(<Class>)` into
+  # `(var_name, narrow_type)` when expr is a LocalVariableReadNode
+  # and the argument is a constant naming a known class. Returns
+  # `["", ""]` if the predicate isn't a narrowable shape (the empty
+  # var name is the sentinel; the caller skips the push).
+  def parse_is_a_predicate(pred_id)
+    if pred_id < 0
+      return ["", ""]
+    end
+    if @nd_type[pred_id] != "CallNode"
+      return ["", ""]
+    end
+    pname = @nd_name[pred_id]
+    if pname != "is_a?" && pname != "kind_of?"
+      return ["", ""]
+    end
+    expr = @nd_receiver[pred_id]
+    if expr < 0 || @nd_type[expr] != "LocalVariableReadNode"
+      return ["", ""]
+    end
+    args = @nd_arguments[pred_id]
+    if args < 0
+      return ["", ""]
+    end
+    arg_ids = get_args(args)
+    if arg_ids.length < 1
+      return ["", ""]
+    end
+    arg0 = arg_ids[0]
+    cname = ""
+    if @nd_type[arg0] == "ConstantReadNode"
+      cname = @nd_name[arg0]
+    elsif @nd_type[arg0] == "ConstantPathNode"
+      cname = resolve_const_ref_name(arg0)
+    end
+    if cname == ""
+      return ["", ""]
+    end
+    nt = narrow_type_for_class(cname)
+    if nt == ""
+      return ["", ""]
+    end
+    [@nd_name[expr], nt]
   end
 
   def set_var_type(name, vtype)
@@ -7034,6 +7303,40 @@ class Compiler
       @current_lexical_scope = saved_scope2
       return
     end
+    # Issue #207: IfNode (incl. ternary). When the predicate is
+    # `var.is_a?(C)` / `kind_of?(C)`, push a narrow on `var` while
+    # walking the then-arm so a recursive call inside the arm sees
+    # the narrowed type and unify_call_types widens the callee's
+    # param accordingly. The else-arm walks unchanged (we don't
+    # currently model "type minus C").
+    if @nd_type[nid] == "IfNode"
+      pred = @nd_predicate[nid]
+      if pred >= 0
+        scan_new_calls(pred)
+      end
+      parsed = parse_is_a_predicate(pred)
+      narrow_var = parsed[0]
+      narrow_t = parsed[1]
+      if narrow_var != ""
+        push_type_narrow(narrow_var, narrow_t)
+      end
+      then_body = @nd_body[nid]
+      if then_body >= 0
+        scan_new_calls(then_body)
+      end
+      if narrow_var != ""
+        pop_type_narrow
+      end
+      sub = @nd_subsequent[nid]
+      if sub >= 0
+        scan_new_calls(sub)
+      end
+      else_body = @nd_else_clause[nid]
+      if else_body >= 0
+        scan_new_calls(else_body)
+      end
+      return
+    end
     if @nd_type[nid] == "CallNode"
       # Also infer top-level method param types from call sites
       mname = @nd_name[nid]
@@ -10517,6 +10820,36 @@ class Compiler
 
   def scan_cls_method_calls(ci, nid)
     if nid < 0
+      return
+    end
+    # Issue #207: same is_a? narrow as scan_new_calls so a self
+    # call inside the then-arm sees the narrowed receiver type.
+    if @nd_type[nid] == "IfNode"
+      pred = @nd_predicate[nid]
+      if pred >= 0
+        scan_cls_method_calls(ci, pred)
+      end
+      parsed = parse_is_a_predicate(pred)
+      narrow_var = parsed[0]
+      narrow_t = parsed[1]
+      if narrow_var != ""
+        push_type_narrow(narrow_var, narrow_t)
+      end
+      then_body = @nd_body[nid]
+      if then_body >= 0
+        scan_cls_method_calls(ci, then_body)
+      end
+      if narrow_var != ""
+        pop_type_narrow
+      end
+      sub = @nd_subsequent[nid]
+      if sub >= 0
+        scan_cls_method_calls(ci, sub)
+      end
+      else_body = @nd_else_clause[nid]
+      if else_body >= 0
+        scan_cls_method_calls(ci, else_body)
+      end
       return
     end
     if @nd_type[nid] == "CallNode"
@@ -20714,6 +21047,41 @@ class Compiler
     # gate misses it. The pre-#131 emit then `sp_box_str`'d the entire
     # raw ternary, which is the same UB.
     if nid >= 0 && @nd_type[nid] == "IfNode"
+      # Issue #207: if the predicate is a statically-decidable
+      # is_a? / kind_of? on an already-typed expression, emit only
+      # the live arm. The dead arm may contain a recursion call
+      # whose argument types don't match the function's signature
+      # (e.g. `v.is_a?(Hash) ? recurse(v) : v` where v is statically
+      # a string) — generating it would land as a C type error
+      # even though the branch is unreachable at runtime.
+      sv = static_is_a_value(@nd_predicate[nid])
+      if sv == "TRUE"
+        body = @nd_body[nid]
+        if body >= 0
+          ts = get_stmts(body)
+          if ts.length > 0
+            return box_expr_to_poly(ts.last)
+          end
+        end
+        return "sp_box_nil()"
+      end
+      if sv == "FALSE"
+        sub = @nd_subsequent[nid]
+        if sub >= 0
+          if @nd_type[sub] == "ElseNode"
+            eb = @nd_body[sub]
+            if eb >= 0
+              es = get_stmts(eb)
+              if es.length > 0
+                return box_expr_to_poly(es.last)
+              end
+            end
+          else
+            return box_expr_to_poly(sub)
+          end
+        end
+        return "sp_box_nil()"
+      end
       cond = compile_cond_expr(@nd_predicate[nid])
       then_v = "sp_box_nil()"
       body = @nd_body[nid]
