@@ -17763,7 +17763,15 @@ class Compiler
       return rc
     end
     # Integer#[idx] — bit indexing. `n[k]` returns bit k of n.
+    # Skip when the receiver is a constant reference (ENV, STDIN,
+    # ::ARGV, ...) — those resolve their type to the int fallback at
+    # infer_type's tail and would otherwise eat the constant's own
+    # `[]` dispatch (e.g. ENV["HOME"] → getenv, ::ARGV[i] → argv).
     if mname == "[]"
+      recv_id = @nd_receiver[nid]
+      if recv_id >= 0 && (@nd_type[recv_id] == "ConstantReadNode" || @nd_type[recv_id] == "ConstantPathNode")
+        return ""
+      end
       args_id = @nd_arguments[nid]
       if args_id >= 0
         aargs = get_args(args_id)
