@@ -86,9 +86,9 @@ PRISM_SRC    = $(wildcard $(PRISM_DIR)/src/*.c) $(wildcard $(PRISM_DIR)/src/util
 PRISM_OBJ    = $(patsubst $(PRISM_DIR)/src/%.c,build/prism/%.o,$(PRISM_SRC))
 PRISM_LIB    = build/libprism.a
 
-.PHONY: all parse bootstrap test bench clean install uninstall deps
+.PHONY: all parse bootstrap codegen test bench clean install uninstall deps
 
-all: parse regexp bootstrap
+all: parse regexp spinel_codegen$(EXE)
 
 # ---- Dependencies ----
 # Clone Prism into vendor/prism at the pinned version. Run this once
@@ -112,7 +112,7 @@ vendor/prism/include/prism/diagnostic.h:
 # If PRISM_DIR ended up empty (no vendor/prism, no gem), halt with a
 # clear message before trying to build anything that needs it.
 ifeq ($(PRISM_DIR),)
-parse bootstrap regexp all: prism-missing
+parse bootstrap codegen regexp all: prism-missing
 prism-missing:
 	@echo "Error: Prism not found."; \
 	 echo "  Run 'make deps' to fetch libprism into vendor/prism,"; \
@@ -158,20 +158,30 @@ $(SP_RT_LIB): $(RE_OBJ) build/sp_bigint.o
 
 regexp: $(SP_RT_LIB)
 
-# ---- Bootstrap ----
+# ---- Build the codegen binary (fast path) ----
+# `make spinel_codegen` (or the alias `make codegen`) compiles
+# spinel_codegen.rb once via CRuby and links the result. This is
+# enough to use the binary; for the full self-hosting fixed-point
+# check (gen2.c == gen3.c), use `make bootstrap`.
 
-bootstrap: spinel_codegen$(EXE)
+codegen: spinel_codegen$(EXE)
 
 spinel_codegen$(EXE): spinel_codegen.rb spinel_parse$(EXE)
-	@echo "=== Bootstrap Step 1: parse ==="
 	./spinel_parse$(EXE) spinel_codegen.rb build/codegen.ast
-	@echo "=== Bootstrap Step 2: gen1 (CRuby) ==="
 	ruby spinel_codegen.rb build/codegen.ast build/gen1.c
-	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/gen1.c $(LDFLAGS) -lm -o build/bin1$(EXE)
-	@echo "=== Bootstrap Step 3: gen2 (bin1) ==="
-	./build/bin1$(EXE) build/codegen.ast build/gen2.c
+	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/gen1.c $(LDFLAGS) -lm -o spinel_codegen$(EXE)
+
+# ---- Self-hosting verification (slow path) ----
+# Re-runs the binary on its own AST to produce gen2.c, compiles bin2,
+# re-runs bin2 to produce gen3.c, asserts gen2.c == gen3.c (the
+# self-hosting fixed point). On success, replaces spinel_codegen with
+# the verified bin2.
+
+bootstrap: spinel_codegen$(EXE)
+	@echo "=== Bootstrap: gen2 (via spinel_codegen) ==="
+	./spinel_codegen$(EXE) build/codegen.ast build/gen2.c
 	$(CC) $(BOOTSTRAP_CFLAGS) -Ilib build/gen2.c $(LDFLAGS) -lm -o build/bin2$(EXE)
-	@echo "=== Bootstrap Step 4: gen3 (bin2) - verify ==="
+	@echo "=== Bootstrap: gen3 (via bin2) - verify ==="
 	./build/bin2$(EXE) build/codegen.ast build/gen3.c
 	@diff build/gen2.c build/gen3.c > /dev/null && echo "gen2.c == gen3.c (bootstrap OK)" || (echo "BOOTSTRAP FAILED: gen2.c != gen3.c" && exit 1)
 	cp build/bin2$(EXE) spinel_codegen$(EXE)
@@ -179,7 +189,7 @@ spinel_codegen$(EXE): spinel_codegen.rb spinel_parse$(EXE)
 # ---- Test ----
 
 test: spinel_parse$(EXE) $(SP_RT_LIB)
-	@if [ ! -f spinel_codegen$(EXE) ]; then echo "Run 'make bootstrap' first"; exit 1; fi
+	@if [ ! -f spinel_codegen$(EXE) ]; then echo "Run 'make' or 'make spinel_codegen' first"; exit 1; fi
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@pass=0; fail=0; err=0; \
 	for f in test/*.rb; do \
@@ -211,7 +221,7 @@ test: spinel_parse$(EXE) $(SP_RT_LIB)
 	if [ $$fail -ne 0 ] || [ $$err -ne 0 ]; then exit 1; fi
 
 bench: spinel_parse$(EXE) $(SP_RT_LIB)
-	@if [ ! -f spinel_codegen$(EXE) ]; then echo "Run 'make bootstrap' first"; exit 1; fi
+	@if [ ! -f spinel_codegen$(EXE) ]; then echo "Run 'make' or 'make spinel_codegen' first"; exit 1; fi
 	@if [ -z "$(TIMEOUT_BIN)" ]; then echo "Note: no 'timeout' command found; running without time limits."; fi
 	@pass=0; fail=0; err=0; skip=0; \
 	for f in benchmark/*.rb; do \
