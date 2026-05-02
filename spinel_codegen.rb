@@ -26830,6 +26830,93 @@ class Compiler
     end
     tmp_arr = new_temp
     tmp_i = new_temp
+    # Range#map: iterate i from first to last (inclusive when ..,
+    # exclusive when ...). The receiver isn't a Range value-type
+    # we can hold in a temp the way arrays are — recompile the
+    # endpoints directly. ParenthesesNode (e.g. `(1..8).map {...}`)
+    # is unwrapped first, since it parses as
+    # CallNode(recv=ParenthesesNode(stmt=RangeNode), name=map).
+    if rt == "range"
+      block_ret_r = "int"
+      blk_r = @nd_block[nid]
+      if blk_r >= 0
+        body_r = @nd_body[blk_r]
+        if body_r >= 0
+          stmts_r = get_stmts(body_r)
+          if stmts_r.length > 0
+            block_ret_r = infer_type(stmts_r.last)
+          end
+        end
+      end
+      # Only handle scalar block returns inline; an array-returning
+      # block (`(0..n).map { |i| [i, ...] }`) would make this an
+      # array-of-arrays, which the int/str/float push helpers can't
+      # express. Fall through to the "0" placeholder for those — the
+      # generic int_array typing keeps any follow-up `@x = [...]`
+      # assignment to the same slot type-checking.
+      if block_ret_r != "int" && block_ret_r != "string" && block_ret_r != "float"
+        return "0"
+      end
+      @needs_int_array = 1
+      @needs_gc = 1
+      if block_ret_r == "string"
+        @needs_str_array = 1
+        emit("  sp_StrArray *" + tmp_arr + " = sp_StrArray_new();")
+      elsif block_ret_r == "float"
+        @needs_float_array = 1
+        emit("  sp_FloatArray *" + tmp_arr + " = sp_FloatArray_new();")
+      else
+        emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
+      end
+      rng_id = @nd_receiver[nid]
+      while rng_id >= 0 && @nd_type[rng_id] == "ParenthesesNode"
+        body_pn = @nd_body[rng_id]
+        if body_pn >= 0
+          ps = get_stmts(body_pn)
+          if ps.length > 0
+            rng_id = ps.last
+          else
+            rng_id = -1
+          end
+        else
+          rng_id = -1
+        end
+      end
+      first_e = compile_expr(@nd_left[rng_id])
+      last_e = compile_expr(@nd_right[rng_id])
+      excl = range_excl_end(rng_id) == 1 ? "<" : "<="
+      emit("  for (mrb_int " + tmp_i + " = " + first_e + "; " + tmp_i + " " + excl + " " + last_e + "; " + tmp_i + "++) {")
+      have_bp_r = (get_block_param(nid, 0) != "")
+      if have_bp_r
+        declare_var(bp1, "int")
+        emit("    lv_" + bp1 + " = " + tmp_i + ";")
+      end
+      @indent = @indent + 1
+      if blk_r >= 0
+        body_r2 = @nd_body[blk_r]
+        if body_r2 >= 0
+          stmts_r2 = get_stmts(body_r2)
+          k_r = 0
+          while k_r < stmts_r2.length - 1
+            compile_stmt(stmts_r2[k_r])
+            k_r = k_r + 1
+          end
+          if stmts_r2.length > 0
+            lastv_r = compile_expr(stmts_r2.last)
+            if block_ret_r == "string"
+              emit("  sp_StrArray_push(" + tmp_arr + ", " + lastv_r + ");")
+            elsif block_ret_r == "float"
+              emit("  sp_FloatArray_push(" + tmp_arr + ", " + lastv_r + ");")
+            else
+              emit("  sp_IntArray_push(" + tmp_arr + ", " + lastv_r + ");")
+            end
+          end
+        end
+      end
+      @indent = @indent - 1
+      emit("  }")
+      return tmp_arr
+    end
     if rt == "int_array" || rt == "sym_array"
       @needs_int_array = 1
       @needs_gc = 1
