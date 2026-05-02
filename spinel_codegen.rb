@@ -3172,6 +3172,15 @@ class Compiler
           if rn == "Hash"
             return "str_int_hash"
           end
+          if rn == "String"
+            # Issue #203: `String.new` / `String.new("...")` returns
+            # a fresh mutable string buffer (sp_String *), the same
+            # type that `s = ""; s << ...` widens a string local
+            # into. Without this branch, the receiver dispatch
+            # treated `String` as an unknown obj-class and the call
+            # warned-and-emitted-0.
+            return "mutable_str"
+          end
           if rn == "Proc"
             return "proc"
           end
@@ -17279,6 +17288,23 @@ class Compiler
         end
         @needs_int_array = 1
         return "sp_IntArray_new()"
+      end
+      if cname == "String"
+        # Issue #203: `String.new` and `String.new("seed")` produce
+        # the same sp_String * value that `s = ""` widens into when
+        # followed by `<<`. Mirror sp_String_new's signature: a NUL-
+        # terminated seed (defaulting to "") that the runtime copies
+        # into the freshly allocated buffer.
+        @needs_mutable_str = 1
+        @needs_gc = 1
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          aargs = get_args(args_id)
+          if aargs.length >= 1
+            return "sp_String_new(" + compile_expr(aargs.first) + ")"
+          end
+        end
+        return "sp_String_new(\"\")"
       end
       if cname == "Hash"
         @needs_str_int_hash = 1
