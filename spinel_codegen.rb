@@ -3187,6 +3187,15 @@ class Compiler
 
   def infer_constructor_type(nid, mname, recv)
     if mname == "new"
+      # Issue #207: implicit recv-less `new` in a class method body
+      # resolves to obj_<CurrentClass> so subsequent attr_writer
+      # calls and ivar widening see the right type.
+      if recv < 0
+        implicit = current_class_method_owning_class
+        if implicit != ""
+          return "obj_" + implicit
+        end
+      end
       if recv >= 0
         rn = constructor_class_name(recv)
         if rn != ""
@@ -7232,6 +7241,45 @@ class Compiler
           end
         end
       end
+      # Issue #207: `<Class>.cls_method(args)` — widen class
+      # method parameter types from call-site argument types.
+      # Same shape as the receiver-method unify above but
+      # operating on @cls_cmeth_ptypes for class-constant recvs.
+      if @nd_type[nid] == "CallNode" && @nd_receiver[nid] >= 0
+        crecv = @nd_receiver[nid]
+        if @nd_type[crecv] == "ConstantReadNode" || @nd_type[crecv] == "ConstantPathNode"
+          rcname = constructor_class_name(crecv)
+          if rcname != ""
+            cci = find_class_idx(rcname)
+            if cci >= 0
+              cmname = @nd_name[nid]
+              cmnames = @cls_cmeth_names[cci].split(";")
+              cm_ptypes_all = @cls_cmeth_ptypes[cci].split("|")
+              cmidx = 0
+              while cmidx < cmnames.length
+                if cmnames[cmidx] == cmname
+                  args_id = @nd_arguments[nid]
+                  if args_id >= 0 && cmidx < cm_ptypes_all.length
+                    arg_ids = get_args(args_id)
+                    cmptypes = cm_ptypes_all[cmidx].split(",")
+                    kk = 0
+                    while kk < arg_ids.length
+                      at = infer_type(arg_ids[kk])
+                      if kk < cmptypes.length
+                        cmptypes[kk] = unify_call_types(cmptypes[kk], at, arg_ids[kk])
+                      end
+                      kk = kk + 1
+                    end
+                    cm_ptypes_all[cmidx] = cmptypes.join(",")
+                    @cls_cmeth_ptypes[cci] = cm_ptypes_all.join("|")
+                  end
+                end
+                cmidx = cmidx + 1
+              end
+            end
+          end
+        end
+      end
     end
     # Recurse into children
     if @nd_body[nid] >= 0
@@ -7972,7 +8020,7 @@ class Compiler
       pop_scope
       i = i + 1
     end
-    # Scan class method bodies
+    # Scan class instance method bodies
     ci = 0
     while ci < @cls_names.length
       @current_class_idx = ci
@@ -8015,6 +8063,56 @@ class Compiler
         end
         bj = bj + 1
       end
+      # Issue #207: also scan class method bodies (def self.<m>) so
+      # an attr_writer call on a freshly-`new`'d instance inside a
+      # `def self.from_raw(...)` factory widens the ivar's type.
+      cm_bodies = @cls_cmeth_bodies[ci].split(";")
+      cm_names = @cls_cmeth_names[ci].split(";")
+      cm_params = @cls_cmeth_params[ci].split("|")
+      cm_ptypes = @cls_cmeth_ptypes[ci].split("|")
+      saved_meth = @current_method_name
+      cbj = 0
+      while cbj < cm_bodies.length
+        cbid = cm_bodies[cbj].to_i
+        if cbid >= 0
+          # Pin @current_method_name to the "<Class>_cls_<m>" form
+          # used by current_class_method_owning_class so implicit
+          # bare `new` inside the body resolves to obj_<Class>.
+          if cbj < cm_names.length
+            @current_method_name = @cls_names[ci] + "_cls_" + cm_names[cbj]
+          end
+          push_scope
+          cpnames = "".split(",")
+          cptypes = "".split(",")
+          if cbj < cm_params.length
+            cpnames = cm_params[cbj].split(",")
+          end
+          if cbj < cm_ptypes.length
+            cptypes = cm_ptypes[cbj].split(",")
+          end
+          cpk = 0
+          while cpk < cpnames.length
+            cpt = "int"
+            if cpk < cptypes.length
+              cpt = cptypes[cpk]
+            end
+            declare_var(cpnames[cpk], cpt)
+            cpk = cpk + 1
+          end
+          cml = "".split(",")
+          cmt = "".split(",")
+          scan_locals(cbid, cml, cmt, cpnames)
+          clk = 0
+          while clk < cml.length
+            declare_var(cml[clk], cmt[clk])
+            clk = clk + 1
+          end
+          scan_writer_calls(cbid)
+          pop_scope
+        end
+        cbj = cbj + 1
+      end
+      @current_method_name = saved_meth
       ci = ci + 1
     end
     @current_class_idx = -1
@@ -8729,16 +8827,50 @@ class Compiler
         j = j + 1
       end
 
-      # Class methods
+      # Class methods. Issue #207: mirror the param/local scope
+      # setup the instance-method side does so a `def self.<m>`
+      # body's return type sees its locals (instance = new etc.)
+      # and bare `new` resolves via current_class_method_owning_class.
       cmnames = @cls_cmeth_names[i].split(";")
       cm_bodies = @cls_cmeth_bodies[i].split(";")
       cm_returns = @cls_cmeth_returns[i].split(";")
+      cm_params = @cls_cmeth_params[i].split("|")
+      cm_ptypes = @cls_cmeth_ptypes[i].split("|")
+      saved_meth = @current_method_name
       j = 0
       while j < cmnames.length
         push_scope
         bid = -1
         if j < cm_bodies.length
           bid = cm_bodies[j].to_i
+        end
+        @current_method_name = @cls_names[i] + "_cls_" + cmnames[j]
+        cpnames = "".split(",")
+        cptypes = "".split(",")
+        if j < cm_params.length
+          cpnames = cm_params[j].split(",")
+        end
+        if j < cm_ptypes.length
+          cptypes = cm_ptypes[j].split(",")
+        end
+        cpk = 0
+        while cpk < cpnames.length
+          cpt = "int"
+          if cpk < cptypes.length
+            cpt = cptypes[cpk]
+          end
+          declare_var(cpnames[cpk], cpt)
+          cpk = cpk + 1
+        end
+        if bid >= 0
+          ml = "".split(",")
+          mt = "".split(",")
+          scan_locals(bid, ml, mt, cpnames)
+          lk = 0
+          while lk < ml.length
+            declare_var(ml[lk], mt[lk])
+            lk = lk + 1
+          end
         end
         rt = infer_body_return(bid)
         if j < cm_returns.length
@@ -8747,6 +8879,7 @@ class Compiler
         pop_scope
         j = j + 1
       end
+      @current_method_name = saved_meth
       @cls_cmeth_returns[i] = cm_returns.join(";")
       @current_class_idx = -1
       i = i + 1
@@ -10323,6 +10456,59 @@ class Compiler
           end
           mi = mi + 1
         end
+        # Issue #207: also iterate this class's class methods
+        # (def self.<m>) so a `params.fetch(:k, "")` call inside a
+        # `def self.from_raw` widens P.fetch's default param via the
+        # receiver-method unify path inside scan_new_calls.
+        cm_names = @cls_cmeth_names[ci].split(";")
+        cm_bodies = @cls_cmeth_bodies[ci].split(";")
+        cm_params = @cls_cmeth_params[ci].split("|")
+        cm_ptypes = @cls_cmeth_ptypes[ci].split("|")
+        saved_meth_cb = @current_method_name
+        cmi = 0
+        while cmi < cm_names.length
+          cbid = -1
+          if cmi < cm_bodies.length
+            cbid = cm_bodies[cmi].to_i
+          end
+          if cbid >= 0
+            @current_class_idx = ci
+            @current_method_name = @cls_names[ci] + "_cls_" + cm_names[cmi]
+            push_scope
+            cpnames = "".split(",")
+            cptypes = "".split(",")
+            if cmi < cm_params.length
+              cpnames = cm_params[cmi].split(",")
+            end
+            if cmi < cm_ptypes.length
+              cptypes = cm_ptypes[cmi].split(",")
+            end
+            cpk = 0
+            while cpk < cpnames.length
+              cpt = "int"
+              if cpk < cptypes.length
+                cpt = cptypes[cpk]
+              end
+              if cpnames[cpk] != ""
+                declare_var(cpnames[cpk], cpt)
+              end
+              cpk = cpk + 1
+            end
+            cml = "".split(",")
+            cmt = "".split(",")
+            scan_locals_first_type(cbid, cml, cmt, cpnames)
+            clk = 0
+            while clk < cml.length
+              declare_var(cml[clk], cmt[clk])
+              clk = clk + 1
+            end
+            scan_new_calls(cbid)
+            pop_scope
+            @current_class_idx = -1
+          end
+          cmi = cmi + 1
+        end
+        @current_method_name = saved_meth_cb
         ci = ci + 1
       end
       pass = pass + 1
@@ -16297,6 +16483,17 @@ class Compiler
   end
 
   def compile_no_recv_call_expr(nid, mname)
+    # Issue #207: bare `new` inside a `def self.<m>` body resolves
+    # to <CurrentClass>.new. Dispatched here (rather than relying on
+    # the later `mname == "new"` branch in compile_call_expr) because
+    # compile_call_expr short-circuits to this function for recv < 0
+    # before reaching that branch.
+    if mname == "new"
+      r = compile_constructor_expr(nid, -1)
+      if r != ""
+        return r
+      end
+    end
     # catch as expression
     if mname == "catch"
       if @nd_block[nid] >= 0
@@ -17296,8 +17493,48 @@ class Compiler
     ""
   end
 
+  # Issue #207: implicit `new` (recv-less) inside a `def self.<m>`
+  # body resolves to <CurrentClass>.new. Without this the recv < 0
+  # branch fell through to "0" with the warning, leaving a factory
+  # like `def self.from_raw(p); instance = new; instance.x = ...; end`
+  # broken. Mirrors how implicit `self` inside instance methods
+  # already routes recv-less calls to the enclosing class.
+  def implicit_new_class_name(recv)
+    if recv >= 0
+      return ""
+    end
+    return current_class_method_owning_class
+  end
+
+  def current_class_method_owning_class
+    if @current_method_name == ""
+      return ""
+    end
+    # Two formats land here: scan_writer_calls pins
+    # "<Class>_cls_<m>" so we can split on the marker; emit-side
+    # sets just "<m>" and relies on @current_class_idx for context.
+    cls_idx = @current_method_name.index("_cls_")
+    if cls_idx != nil && cls_idx >= 0
+      return @current_method_name[0, cls_idx]
+    end
+    if @current_class_idx >= 0 && @current_class_idx < @cls_names.length
+      cm = @cls_cmeth_names[@current_class_idx].split(";")
+      k = 0
+      while k < cm.length
+        if cm[k] == @current_method_name
+          return @cls_names[@current_class_idx]
+        end
+        k = k + 1
+      end
+    end
+    ""
+  end
+
   def compile_constructor_expr(nid, recv)
     cname = constructor_class_name(recv)
+    if cname == ""
+      cname = implicit_new_class_name(recv)
+    end
     if cname != ""
       if cname == "Proc"
         if @nd_block[nid] >= 0
