@@ -18309,11 +18309,16 @@ class Compiler
         return "sp_poly_sub(" + compile_expr(recv) + ", " + box_expr_to_poly(get_args(args_id)[0]) + ")"
       end
       # Hoist both sides into temps: each may be a fresh sp_time_now()
-      # call, and tv_sec / tv_nsec are read twice each.
+      # call, and tv_sec / tv_nsec are read twice each. Subtract the
+      # integer fields *before* converting to float so we don't lose
+      # bits when both timestamps are large (`tv_sec` past 2^53 seconds
+      # falls outside double's exact-integer range, where the difference
+      # `(double)a - (double)b` could miss the low-order bits even
+      # though `(int64_t)(a - b)` is exact).
       if lt == "time"
         rhs_id = get_args(args_id)[0]
         if infer_type(rhs_id) == "time"
-          return "({ sp_Time _a = " + compile_expr(recv) + "; sp_Time _b = " + compile_expr(rhs_id) + "; ((mrb_float)_a.tv_sec - (mrb_float)_b.tv_sec) + ((mrb_float)_a.tv_nsec - (mrb_float)_b.tv_nsec) / 1e9; })"
+          return "({ sp_Time _a = " + compile_expr(recv) + "; sp_Time _b = " + compile_expr(rhs_id) + "; (mrb_float)(_a.tv_sec - _b.tv_sec) + (mrb_float)(_a.tv_nsec - _b.tv_nsec) / 1e9; })"
         end
       end
       r = compile_array_setop_expr(nid, recv, "difference", lt)
