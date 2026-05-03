@@ -21843,8 +21843,11 @@ class Compiler
     # expression for every if-branch below.
     recv_tmp = new_temp
     emit("  sp_RbVal " + recv_tmp + " = " + rc + ";")
-    # Compile the call's argument list once.
+    # Compile the call's argument list once. Track the inferred
+    # source type alongside the compiled expression so the int-bit
+    # branch below can unbox a poly arg without re-walking the AST.
     arg_compiled = "".split(",")
+    arg_types = "".split(",")
     arg_strs = ""
     args_id = @nd_arguments[nid]
     if args_id >= 0
@@ -21853,6 +21856,7 @@ class Compiler
       while k < aargs.length
         ce = compile_expr(aargs[k])
         arg_compiled.push(ce)
+        arg_types.push(infer_type(aargs[k]))
         arg_strs = arg_strs + ", " + ce
         k = k + 1
       end
