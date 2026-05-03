@@ -28313,6 +28313,7 @@ class Compiler
       end
       @needs_int_array = 1
       @needs_gc = 1
+      ret_is_arr = false
       if block_ret_r == "string"
         @needs_str_array = 1
         emit("  sp_StrArray *" + tmp_arr + " = sp_StrArray_new();")
@@ -28476,7 +28477,18 @@ class Compiler
         pop_scope
         return tmp_arr
       else
-        emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
+        # Block returning a homogeneous typed array (e.g.
+        # `[1, 6].map { (0..n).map { ... } }`) — accumulator must
+        # be a PtrArray so GC keeps each element alive (an IntArray
+        # accumulator with pointer-payload mrb_ints would let the
+        # inner arrays be collected).
+        ret_is_arr2 = (block_ret == "int_array" || block_ret == "float_array" || block_ret == "str_array" || block_ret == "sym_array")
+        if ret_is_arr2
+          @needs_ptr_array = 1
+          emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
+        else
+          emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
+        end
         emit("  SP_GC_ROOT(" + tmp_arr + ");")
         emit("  for (mrb_int " + tmp_i + " = 0; " + tmp_i + " < sp_IntArray_length(" + rc + "); " + tmp_i + "++) {")
         if bp_is_lambda == 1
@@ -28492,9 +28504,13 @@ class Compiler
           if stmts3.length > 0
             last = stmts3[stmts3.length - 1]
             val = compile_expr(last)
-            emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
+            if ret_is_arr2
+              emit("  sp_PtrArray_push(" + tmp_arr + ", (void *)(" + val + "));")
+            else
+              emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
+            end
           else
-            emit_map_default_push(tmp_arr, "int_array")
+            emit_map_default_push(tmp_arr, ret_is_arr2 ? "ptr_array" : "int_array")
           end
         end
         @indent = @indent - 1
