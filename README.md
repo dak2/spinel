@@ -81,7 +81,7 @@ gen2.c == gen3.c   (bootstrap loop closed)
 
 ## Benchmarks
 
-74 tests pass. 55 benchmarks pass.
+290 tests pass. 55 benchmarks pass.
 Geometric mean: **~11.6x faster** than miniruby (Ruby 4.1.0dev) across
 the 28 benchmarks below. Baseline is the latest CRuby `miniruby` build
 (without bundled gems), which is considerably faster than the system
@@ -257,13 +257,13 @@ Whole-program type inference drives several compile-time optimizations:
 
 ```
 spinel                One-command wrapper script (POSIX shell)
-spinel_parse.c        C frontend: libprism → text AST (1_061 lines)
-spinel_codegen.rb     Compiler backend: AST → C code (21_109 lines)
-lib/sp_runtime.h      Runtime library header (581 lines)
+spinel_parse.c        C frontend: libprism → text AST (1_276 lines)
+spinel_codegen.rb     Compiler backend: AST → C code (30_795 lines)
+lib/sp_runtime.h      Runtime library header (1_089 lines)
 lib/sp_bigint.c       Arbitrary precision integers (5_394 lines)
-lib/regexp/           Built-in regexp engine (1_759 lines)
-test/                 74 feature tests
-benchmark/            55 benchmarks
+lib/regexp/           Built-in regexp engine (1_866 lines)
+test/                 290 feature tests
+benchmark/            56 benchmarks
 Makefile              Build automation
 ```
 
@@ -292,8 +292,8 @@ by inlining the referenced file.
 ```bash
 make deps         # fetch libprism into vendor/prism (one-time)
 make              # build parser + regexp library + bootstrap compiler
-make test         # run 74 feature tests (requires bootstrap)
-make bench        # run 55 benchmarks (requires bootstrap)
+make test         # run 290 feature tests (requires bootstrap)
+make bench        # run 56 benchmarks (requires bootstrap)
 make bootstrap    # rebuild compiler from source
 sudo make install # install to /usr/local (spinel in PATH)
 make clean        # remove build artifacts
