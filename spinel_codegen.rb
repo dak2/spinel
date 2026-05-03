@@ -8768,16 +8768,22 @@ class Compiler
       if @current_class_idx >= 0
         iname = @nd_name[nid]
         expr_id = @nd_expression[nid]
-        # Drill through chained `@a = @b = ... = expr` so the chain head
-        # sees the bottom rhs type — infer_type returns the default
-        # "int" for an InstanceVariableWriteNode expr, which would
-        # leave @a's slot un-widened against a real concrete bottom
-        # type and force compile_stmt to emit a type-mismatched store.
+        # Drill through chained `@a = @b = ... = expr` so every chain
+        # participant sees the bottom rhs type — infer_type returns
+        # the default "int" for an InstanceVariableWriteNode expr,
+        # which would leave participants un-widened against a real
+        # concrete bottom type and force compile_stmt to emit
+        # type-mismatched stores. Issue #235: collecting *every*
+        # participant (not just the head) is required because a
+        # CallNode rhs (`@a = @b = make_int`) bypasses scan_ivars's
+        # dual-definite-literal widening and tail slots stay at
+        # their pre-existing concrete type.
+        chain_inames = "".split(",")
+        chain_inames.push(iname)
         bottom = expr_id
-        is_chain_head = 0
         while bottom >= 0 && @nd_type[bottom] == "InstanceVariableWriteNode"
+          chain_inames.push(@nd_name[bottom])
           bottom = @nd_expression[bottom]
-          is_chain_head = 1
         end
         # Empty `{}` / `[]` literal: don't reset the ivar's tracked
         # type to the default (`str_int_hash` / `int_array`), since a
@@ -8786,12 +8792,16 @@ class Compiler
         # widen the promoted type to poly on the next iteration.
         if is_empty_hash_literal(bottom) == 0 && is_empty_array_literal(bottom) == 0
           at = infer_type(bottom)
-          # Chain heads must widen even on int/nil rhs — the head's
+          # Chain participants must widen even on int/nil rhs — the
           # current slot type may be a concrete pointer type that
           # update_ivar_type promotes to poly (or the nullable
           # variant) once it sees the bottom rhs.
-          if is_chain_head == 1
-            update_ivar_type(@current_class_idx, iname, at)
+          if chain_inames.length > 1
+            ci_idx = 0
+            while ci_idx < chain_inames.length
+              update_ivar_type(@current_class_idx, chain_inames[ci_idx], at)
+              ci_idx = ci_idx + 1
+            end
           elsif at != "int" && at != "nil"
             update_ivar_type(@current_class_idx, iname, at)
           end
