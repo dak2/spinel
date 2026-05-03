@@ -4284,21 +4284,28 @@ class Compiler
       return 0
     end
     recv_elems = parse_id_list(@nd_elements[arr_recv])
-    if recv_elems.length == 0
+    # Restrict to single-element [nil] or [0] literals — the emit
+    # paths in compile_expr_for_expected_type / emit_constructor /
+    # compile_stmt all multiply by N (the multiplier) and fill with
+    # NULL/0, so a multi-element literal would produce length=N
+    # instead of length=N*elements, and a non-zero integer literal
+    # would silently lose its value. The Gemini review on PR #241
+    # caught both gaps. Stay tight: only the canonical
+    # `[nil] * N` and `[0] * N` shapes.
+    if recv_elems.length != 1
       return 0
     end
-    ei = 0
-    while ei < recv_elems.length
-      ti = recv_elems[ei]
-      if ti < 0
-        return 0
-      end
-      if @nd_type[ti] != "NilNode" && @nd_type[ti] != "IntegerNode"
-        return 0
-      end
-      ei = ei + 1
+    ti = recv_elems[0]
+    if ti < 0
+      return 0
     end
-    1
+    if @nd_type[ti] == "NilNode"
+      return 1
+    end
+    if @nd_type[ti] == "IntegerNode" && @nd_value[ti].to_i == 0
+      return 1
+    end
+    0
   end
 
   def base_type(t)
@@ -9096,6 +9103,12 @@ class Compiler
                 elsif promoted == "poly_array"
                   @needs_rb_value = 1
                   @needs_gc = 1
+                elsif is_ptr_array_type(promoted) == 1
+                  # ptr_array slots hold object pointers, so the
+                  # owning class needs gc_scan emitted; without
+                  # this flag the captured pointers leak and the
+                  # collector misses them. Gemini #241 review.
+                  @needs_gc = 1
                 end
               end
             end
@@ -9128,6 +9141,12 @@ class Compiler
                   @needs_int_array = 1
                 elsif promoted == "poly_array"
                   @needs_rb_value = 1
+                  @needs_gc = 1
+                elsif is_ptr_array_type(promoted) == 1
+                  # ptr_array slots hold object pointers, so the
+                  # owning class needs gc_scan emitted; without
+                  # this flag the captured pointers leak and the
+                  # collector misses them. Gemini #241 review.
                   @needs_gc = 1
                 end
               end
