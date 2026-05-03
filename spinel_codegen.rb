@@ -3280,11 +3280,34 @@ class Compiler
               if is_obj_type(bret) == 1
                 return bret + "_ptr_array"
               end
-              # Block returns a non-trivial type (an array literal,
-              # poly value, ...). The map's overall result is still an
-              # Array — fall through to the recv-based default below
-              # only when recv is already array-shaped, otherwise
-              # return int_array as a generic placeholder.
+              # Block returns an array (e.g.
+              # `[1, 6].map { (0..n).map { ... } }` — each outer
+              # element is itself an int_array). The outer map's
+              # result is then an array of arrays, encoded as
+              # `<inner>_ptr_array`. Only fire this for array-shaped
+              # recv (where the elements have a definite shape and
+              # ivar typing reaches the ptr_array placeholder); for
+              # range/int recv we fall through to the int_array
+              # placeholder below so a follow-up int-typed assignment
+              # to the same ivar still type-checks.
+              if bret == "int_array" || bret == "float_array" || bret == "str_array" || bret == "sym_array"
+                rt_recv_p = infer_type(recv)
+                if rt_recv_p != "range" && rt_recv_p != "int"
+                  return bret + "_ptr_array"
+                end
+              end
+              # poly_array bret intentionally falls through. Returning
+              # poly_array_ptr_array would be more accurate, but ivars
+              # holding the result (and the corresponding `[nil] *
+              # n` companions) often haven't been widened to the
+              # ptr_array shape by the type-inference pass yet.
+              # Letting it fall through to int_array preserves the
+              # pre-fix typing that those companion ivars match.
+              # Block returns a non-trivial type (poly value, etc.).
+              # The map's overall result is still an Array — fall
+              # through to the recv-based default below only when
+              # recv is already array-shaped, otherwise return
+              # int_array as a generic placeholder.
             end
           end
         end
