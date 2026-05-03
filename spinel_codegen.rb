@@ -3561,6 +3561,11 @@ class Compiler
             return "float"
           end
         end
+        if rcname == "Time"
+          if mname == "now"
+            return "float"
+          end
+        end
         if rcname == "File"
           if mname == "read" || mname == "binread"
             return "string"
@@ -16762,6 +16767,18 @@ class Compiler
       end
     end
 
+    # Time.now.to_i — bypass the Time.now float roundtrip and emit
+    # time(NULL) directly. Going through (mrb_int)((double)tv_sec +
+    # tv_nsec/1e9) rounds up to tv_sec+1 when tv_nsec lands in the
+    # last ~240ns of a second (~2.4e-7 chance per call); time(NULL)
+    # returns exact tv_sec, matching CRuby's Time#to_i semantics.
+    if mname == "to_i" && recv >= 0 && @nd_type[recv] == "CallNode" && @nd_name[recv] == "now"
+      rr = @nd_receiver[recv]
+      if rr >= 0 && @nd_type[rr] == "ConstantReadNode" && @nd_name[rr] == "Time"
+        return "((mrb_int)time(NULL))"
+      end
+    end
+
     recv_type = infer_type(recv)
     # Nullable receiver: dispatch identically to the base type. The
     # null check is the caller's responsibility, matching Ruby's
@@ -17265,6 +17282,9 @@ class Compiler
       if st == "float"
         if mname == "to_i"
           return "(mrb_int)(self)"
+        end
+        if mname == "to_f"
+          return "(self)"
         end
         if mname == "to_s"
           return "sp_float_to_s(self)"
@@ -19027,6 +19047,9 @@ class Compiler
     if mname == "to_i"
       return "(mrb_int)(" + rc + ")"
     end
+    if mname == "to_f"
+      return "(" + rc + ")"
+    end
     # ceil/floor/round/truncate with precision arg use a GCC stmt-expr so
     # the argument expression is compiled-and-emitted once on the Ruby
     # side and pow(10, n) is evaluated once at runtime — the original
@@ -20471,10 +20494,12 @@ class Compiler
           return "sp_file_basename(" + compile_arg0(nid) + ")"
         end
       end
-      # Time
+      # Time.now — wall-clock seconds-since-epoch as float, matching
+      # CRuby's Time#to_f semantics so `Time.now.to_f * 1000` actually
+      # yields milliseconds with sub-second precision.
       if rcname == "Time"
         if mname == "now"
-          return "((mrb_int)time(NULL))"
+          return "({ struct timespec _ts; clock_gettime(CLOCK_REALTIME, &_ts); (mrb_float)_ts.tv_sec + (mrb_float)_ts.tv_nsec / 1e9; })"
         end
       end
       # Process.clock_gettime — assume CLOCK_MONOTONIC; the clock_id
