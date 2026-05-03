@@ -11409,6 +11409,13 @@ class Compiler
       end
       gi = gi + 1
     end
+    # Issue #229: compute the live set of cls methods before any
+    # cls-method-related emit. Forward decls + bodies both consult
+    # @cls_cmeth_live to skip uncalled methods that may otherwise
+    # emit non-compiling bodies (uncalled `def self.factory(attrs);
+    # new(attrs); end` against a 0-arg or differently-typed
+    # constructor).
+    compute_live_cls_methods
     emit_forward_decls
     emit_global_constants
     emit_raw("/*LAMBDA_INSERT_POINT*/")
@@ -13199,12 +13206,20 @@ class Compiler
       cm_ptypes = @cls_cmeth_ptypes[i].split("|")
       j = 0
       while j < cmnames.length
-        rt = "int"
-        if j < cm_returns.length
-          rt = cm_returns[j]
+        # Issue #229: skip forward decls for dead cls methods so the
+        # linker doesn't see "declared here" without a definition
+        # (the corresponding emit_class_methods skip would still
+        # otherwise leave the prototype dangling).
+        if cls_cmeth_is_live(i, cmnames[j]) == 0
+          j = j + 1
+        else
+          rt = "int"
+          if j < cm_returns.length
+            rt = cm_returns[j]
+          end
+          emit_raw("static " + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(cmnames[j]) + "(" + cls_method_params_decl(j, cm_params, cm_ptypes) + ");")
+          j = j + 1
         end
-        emit_raw("static " + c_type(rt) + " sp_" + cname + "_cls_" + sanitize_name(cmnames[j]) + "(" + cls_method_params_decl(j, cm_params, cm_ptypes) + ");")
-        j = j + 1
       end
       i = i + 1
     end
@@ -13581,17 +13596,16 @@ class Compiler
         if j < cm_ptypes.length
           ptypes = cm_ptypes[j].split(",")
         end
-        # Issue #224: a class's cls method whose body has bare
-        # `new(args)` would emit `sp_<this_class>_new(args)`. If
-        # this class has no resolvable initialize (no own one and
-        # no inherited one), the synthesized constructor is 0-arg —
-        # so the call wouldn't C-compile. This shape only arises
-        # when a *parent* class defines `def self.factory(attrs);
-        # new(attrs); ...; end` to be inherited by subclasses with
-        # an attrs-taking initialize; calling the parent's version
-        # directly is a runtime error in CRuby anyway. Skip emit
-        # rather than producing a non-compiling body.
-        if bid > 0 && find_init_class(i) < 0 && body_has_bare_new_with_args(bid) == 1
+        # Issue #229: dead-code-eliminate cls methods with no call
+        # site. The bug is that an unused `def self.factory(attrs);
+        # new(attrs); ...; end` emits a body whose `sp_<this>_new(args)`
+        # may not match the defining class's actual constructor
+        # arity/types — spinel can't infer types for an uncalled
+        # method, so the body fails to C-compile. compute_live_cls_methods
+        # ran before emit and seeded live entries from explicit
+        # `<Class>.<m>(...)` call sites + transitive self/bare calls
+        # within live cls method bodies.
+        if cls_cmeth_is_live(i, cmnames[j]) == 0
           j = j + 1
         else
           emit_class_level_method(i, cmnames[j], pnames, ptypes, rt, bid)
@@ -13602,101 +13616,232 @@ class Compiler
     end
   end
 
-  # Issue #224: detect bare `new(args)` (recv < 0, args.length > 0)
-  # anywhere in a cls method body. Used by emit_class_methods to
-  # skip emitting a class's version of an inherited method when the
-  # class has no resolvable initialize — emitting would synthesize
-  # `sp_<class>_new(args)` against a 0-arg default constructor and
-  # the C compiler would reject the body. The synthetic copies on
-  # subclasses (with their own initialize) emit normally.
-  def body_has_bare_new_with_args(nid)
-    if nid < 0
+  # Issue #229: dead-code elimination for cls methods. An uncalled
+  # `def self.factory(attrs); new(attrs); ...; end` on a parent
+  # class whose own `initialize` has different arity emits a body
+  # that doesn't C-compile (`sp_<class>_new(args)` against a 0-arg
+  # constructor; or, with a default-arg `initialize`, against a
+  # typed param when the uncalled method's own param can't be
+  # inferred). The reachability set seeds from explicit
+  # `<Class>.<m>(...)` call sites in the AST, then propagates
+  # through bare/self calls inside live cls method bodies. Anything
+  # not reached is skipped at forward-decl + body emit time.
+  #
+  # Live entries are stored as `<ClassName>::<methodName>` joined
+  # by `;` in @cls_cmeth_live. Idempotent: marking an already-live
+  # entry is a no-op.
+  def compute_live_cls_methods
+    @cls_cmeth_live = ""
+    collect_cls_calls(@root_id, -1)
+    iter = 0
+    prev_len = @cls_cmeth_live.length
+    while iter < 8
+      i = 0
+      while i < @cls_names.length
+        cmnames = @cls_cmeth_names[i].split(";")
+        cm_bodies = @cls_cmeth_bodies[i].split(";")
+        j = 0
+        while j < cmnames.length
+          if cmnames[j] != "" && cls_cmeth_is_live(i, cmnames[j]) == 1
+            bid = -1
+            if j < cm_bodies.length
+              bs = cm_bodies[j]
+              if bs != ""
+                bid = bs.to_i
+              end
+            end
+            if bid > 0
+              collect_cls_calls(bid, i)
+            end
+          end
+          j = j + 1
+        end
+        i = i + 1
+      end
+      cur_len = @cls_cmeth_live.length
+      if cur_len == prev_len
+        return
+      end
+      prev_len = cur_len
+      iter = iter + 1
+    end
+  end
+
+  def cls_cmeth_is_live(ci, mname)
+    if ci < 0 || ci >= @cls_names.length
       return 0
     end
-    if @nd_type[nid] == "CallNode" && @nd_name[nid] == "new" && @nd_receiver[nid] < 0
-      args_id = @nd_arguments[nid]
-      if args_id >= 0
-        arg_ids = get_args(args_id)
-        if arg_ids.length > 0
-          return 1
+    if @cls_cmeth_live == nil || @cls_cmeth_live == ""
+      return 0
+    end
+    # Sentinel-bracketed lookup so "Foo::bar" doesn't match
+    # "Foo::barbaz". `String#include?` returns a clean true/false in
+    # both CRuby and spinel; `String#index` works in CRuby but in
+    # spinel returns mrb_int (-1 / 0+) and `ix == nil` compiles to
+    # `ix == 0`, misclassifying the first-listed entry as missing.
+    needle = ";" + @cls_names[ci] + "::" + mname + ";"
+    haystack = ";" + @cls_cmeth_live + ";"
+    if haystack.include?(needle)
+      return 1
+    end
+    0
+  end
+
+  def cls_cmeth_mark_live(ci, mname)
+    if ci < 0 || ci >= @cls_names.length
+      return
+    end
+    cmnames = @cls_cmeth_names[ci].split(";")
+    has = 0
+    k = 0
+    while k < cmnames.length
+      if cmnames[k] == mname
+        has = 1
+      end
+      k = k + 1
+    end
+    if has == 0
+      return
+    end
+    if cls_cmeth_is_live(ci, mname) == 1
+      return
+    end
+    entry = @cls_names[ci] + "::" + mname
+    if @cls_cmeth_live == ""
+      @cls_cmeth_live = entry
+    else
+      @cls_cmeth_live = @cls_cmeth_live + ";" + entry
+    end
+  end
+
+  # Walk the subtree at `nid`, marking cls methods reached by:
+  #   - `<Const>.<m>(...)`            (any context)
+  #   - `self.<m>(...)`               (only when ctx_ci >= 0, i.e.
+  #     we're walking inside a cls method body of class ctx_ci)
+  #   - bare `<m>(...)` with no recv  (ditto; `<m>` resolves to
+  #     a cls method on ctx_ci if one exists with that name)
+  #
+  # ctx_ci is propagated unchanged through normal nodes, but cleared
+  # to -1 when descending into a DefNode body (a nested method has
+  # its own scope; bare calls there resolve to top-level methods or
+  # to that DefNode's own class context, neither of which we want
+  # to attribute to the outer cls method).
+  def collect_cls_calls(nid, ctx_ci)
+    if nid < 0
+      return
+    end
+    if @nd_type[nid] == "CallNode"
+      recv = @nd_receiver[nid]
+      mname = @nd_name[nid]
+      if recv >= 0
+        if @nd_type[recv] == "ConstantReadNode" || @nd_type[recv] == "ConstantPathNode"
+          cname = constructor_class_name(recv)
+          if cname != ""
+            tci = find_class_idx(cname)
+            if tci >= 0
+              cls_cmeth_mark_live(tci, mname)
+            end
+          end
+        end
+        if @nd_type[recv] == "SelfNode" && ctx_ci >= 0
+          cls_cmeth_mark_live(ctx_ci, mname)
+        end
+        # Issue #126 / #229 interaction: `<Module>.<acc>.<method>`
+        # where `<Module>.<acc>` was constant-folded by Pass 2.7
+        # (resolve_module_singleton_accessors) to a class name.
+        # The receiver is a CallNode at AST level, so the
+        # ConstantReadNode branch above doesn't catch it. Look up
+        # the fold and mark the resolved class's cls method live.
+        if @nd_type[recv] == "CallNode"
+          inner_recv = @nd_receiver[recv]
+          if inner_recv >= 0 && @nd_type[inner_recv] == "ConstantReadNode"
+            mod_name = @nd_name[inner_recv]
+            resolved = module_acc_resolved(mod_name, @nd_name[recv])
+            if resolved != "" && resolved != "?"
+              rnames = resolved.split(";")
+              ri = 0
+              while ri < rnames.length
+                tci2 = find_class_idx(rnames[ri])
+                if tci2 >= 0
+                  cls_cmeth_mark_live(tci2, mname)
+                end
+                ri = ri + 1
+              end
+            end
+          end
+        end
+      else
+        if ctx_ci >= 0
+          cls_cmeth_mark_live(ctx_ci, mname)
         end
       end
     end
-    if @nd_body[nid] >= 0
-      if body_has_bare_new_with_args(@nd_body[nid]) == 1
-        return 1
-      end
+    # Don't descend into nested DefNode bodies: they have their own
+    # scope and a separate phase walks each live cls method body
+    # with the correct ctx_ci.
+    if @nd_type[nid] == "DefNode"
+      return
     end
-    bn_stmts = parse_id_list(@nd_stmts[nid])
+    if @nd_body[nid] >= 0
+      collect_cls_calls(@nd_body[nid], ctx_ci)
+    end
+    cs_stmts = parse_id_list(@nd_stmts[nid])
     k = 0
-    while k < bn_stmts.length
-      if body_has_bare_new_with_args(bn_stmts[k]) == 1
-        return 1
-      end
+    while k < cs_stmts.length
+      collect_cls_calls(cs_stmts[k], ctx_ci)
       k = k + 1
     end
     if @nd_receiver[nid] >= 0
-      if body_has_bare_new_with_args(@nd_receiver[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_receiver[nid], ctx_ci)
     end
     if @nd_arguments[nid] >= 0
-      if body_has_bare_new_with_args(@nd_arguments[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_arguments[nid], ctx_ci)
     end
-    bn_args = parse_id_list(@nd_args[nid])
+    cs_args = parse_id_list(@nd_args[nid])
     k = 0
-    while k < bn_args.length
-      if body_has_bare_new_with_args(bn_args[k]) == 1
-        return 1
-      end
+    while k < cs_args.length
+      collect_cls_calls(cs_args[k], ctx_ci)
       k = k + 1
     end
     if @nd_expression[nid] >= 0
-      if body_has_bare_new_with_args(@nd_expression[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_expression[nid], ctx_ci)
     end
     if @nd_predicate[nid] >= 0
-      if body_has_bare_new_with_args(@nd_predicate[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_predicate[nid], ctx_ci)
     end
     if @nd_subsequent[nid] >= 0
-      if body_has_bare_new_with_args(@nd_subsequent[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_subsequent[nid], ctx_ci)
     end
     if @nd_else_clause[nid] >= 0
-      if body_has_bare_new_with_args(@nd_else_clause[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_else_clause[nid], ctx_ci)
     end
     if @nd_left[nid] >= 0
-      if body_has_bare_new_with_args(@nd_left[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_left[nid], ctx_ci)
     end
     if @nd_right[nid] >= 0
-      if body_has_bare_new_with_args(@nd_right[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_right[nid], ctx_ci)
     end
     if @nd_block[nid] >= 0
-      if body_has_bare_new_with_args(@nd_block[nid]) == 1
-        return 1
-      end
+      collect_cls_calls(@nd_block[nid], ctx_ci)
     end
-    bn_elems = parse_id_list(@nd_elements[nid])
+    cs_elems = parse_id_list(@nd_elements[nid])
     k = 0
-    while k < bn_elems.length
-      if body_has_bare_new_with_args(bn_elems[k]) == 1
-        return 1
-      end
+    while k < cs_elems.length
+      collect_cls_calls(cs_elems[k], ctx_ci)
       k = k + 1
     end
-    0
+    cs_conds = parse_id_list(@nd_conditions[nid])
+    k = 0
+    while k < cs_conds.length
+      collect_cls_calls(cs_conds[k], ctx_ci)
+      k = k + 1
+    end
+    cs_parts = parse_id_list(@nd_parts[nid])
+    k = 0
+    while k < cs_parts.length
+      collect_cls_calls(cs_parts[k], ctx_ci)
+      k = k + 1
+    end
   end
 
   def emit_constructor(ci)
