@@ -142,6 +142,7 @@ class Compiler
     @cls_cmeth_ptypes = "".split(",")
     @cls_cmeth_returns = "".split(",")
     @cls_cmeth_bodies = "".split(",")
+    @cls_cmeth_defaults = "".split(",")
     @cls_is_value_type = []
     # SRA (scalar replacement of aggregates) eligibility flag per class.
     # Classes marked here can have their non-escaping instances replaced
@@ -4866,6 +4867,7 @@ class Compiler
           p_cmbodies = @cls_cmeth_bodies[pi].split(";")
           p_cmparams = @cls_cmeth_params[pi].split("|")
           p_cmptypes = @cls_cmeth_ptypes[pi].split("|")
+          p_cmdefaults = @cls_cmeth_defaults[pi].split("|")
           pj = 0
           while pj < p_cmnames.length
             mname = p_cmnames[pj]
@@ -4886,7 +4888,11 @@ class Compiler
               if pj < p_cmptypes.length
                 pptypes = p_cmptypes[pj]
               end
-              append_cls_cmeth(ci, mname, pparams, pptypes, pret, pbid)
+              pdefaults = ""
+              if pj < p_cmdefaults.length
+                pdefaults = p_cmdefaults[pj]
+              end
+              append_cls_cmeth(ci, mname, pparams, pptypes, pret, pbid, pdefaults)
               seen.push(mname)
             end
             pj = pj + 1
@@ -5734,6 +5740,7 @@ class Compiler
     @cls_cmeth_ptypes.push("")
     @cls_cmeth_returns.push("")
     @cls_cmeth_bodies.push("")
+    @cls_cmeth_defaults.push("")
     @cls_meth_has_yield.push("")
 
     # Collect class body
@@ -5844,7 +5851,7 @@ class Compiler
         params_str = collect_params_str(nid)
         ptypes_str = collect_ptypes_str(nid, ci)
         defaults_str = collect_defaults_str(nid)
-        append_cls_cmeth(ci, mname, params_str, ptypes_str, "int", body_id)
+        append_cls_cmeth(ci, mname, params_str, ptypes_str, "int", body_id, defaults_str)
         return
       end
     end
@@ -6098,19 +6105,21 @@ class Compiler
     end
   end
 
-  def append_cls_cmeth(ci, name, params, ptypes, ret, body_id)
+  def append_cls_cmeth(ci, name, params, ptypes, ret, body_id, defaults = "")
     if @cls_cmeth_names[ci] != ""
       @cls_cmeth_names[ci] = @cls_cmeth_names[ci] + ";" + name
       @cls_cmeth_params[ci] = @cls_cmeth_params[ci] + "|" + params
       @cls_cmeth_ptypes[ci] = @cls_cmeth_ptypes[ci] + "|" + ptypes
       @cls_cmeth_returns[ci] = @cls_cmeth_returns[ci] + ";" + ret
       @cls_cmeth_bodies[ci] = @cls_cmeth_bodies[ci] + ";" + body_id.to_s
+      @cls_cmeth_defaults[ci] = @cls_cmeth_defaults[ci] + "|" + defaults
     else
       @cls_cmeth_names[ci] = name
       @cls_cmeth_params[ci] = params
       @cls_cmeth_ptypes[ci] = ptypes
       @cls_cmeth_returns[ci] = ret
       @cls_cmeth_bodies[ci] = body_id.to_s
+      @cls_cmeth_defaults[ci] = defaults
     end
   end
 
@@ -6842,7 +6851,13 @@ class Compiler
             @meth_return_types.push("int")
             @meth_body_ids.push(@nd_body[sid])
             @meth_has_yield.push(0)
-            @meth_has_defaults.push("0")
+            # Issue #239: capture default-arg expressions so call
+            # sites that omit trailing args get them filled in by
+            # compile_call_args_with_defaults. Pre-fix this slot
+            # was hardcoded to "0", which `compile_expr` lowered to
+            # the literal `0` regardless of the actual default
+            # (string literals etc.).
+            @meth_has_defaults.push(collect_defaults_str(sid))
             @meth_rest_index.push(collect_rest_index(sid))
           end
         end
@@ -6970,6 +6985,7 @@ class Compiler
     @cls_cmeth_ptypes.push("")
     @cls_cmeth_returns.push("")
     @cls_cmeth_bodies.push("")
+    @cls_cmeth_defaults.push("")
     @cls_meth_has_yield.push("")
 
     # Get field names from symbol args (skip keyword_init hash)
@@ -7775,6 +7791,36 @@ class Compiler
                   end
                 end
                 cmidx = cmidx + 1
+              end
+            end
+            # Issue #239: module class methods (`module M; def
+            # self.greet(...); end; end`) live in the top-level
+            # `@meth_*` tables under the synthetic name
+            # `<Mod>_cls_<m>`, not in `@cls_cmeth_*`. The widening
+            # branch above doesn't reach them because `find_class_idx`
+            # returns -1 for module names. Add a parallel branch
+            # that widens `@meth_param_types` for the prefixed name
+            # so a `M.greet("a")` call site teaches the synthetic
+            # function to accept `const char *` instead of the
+            # default `mrb_int`.
+            if module_name_exists(rcname) == 1
+              mfn239 = rcname + "_cls_" + @nd_name[nid]
+              mi239 = find_method_idx(mfn239)
+              if mi239 >= 0
+                args_id239 = @nd_arguments[nid]
+                if args_id239 >= 0
+                  arg_ids239 = get_args(args_id239)
+                  ptypes239 = @meth_param_types[mi239].split(",")
+                  kk239 = 0
+                  while kk239 < arg_ids239.length
+                    at239 = infer_type(arg_ids239[kk239])
+                    if kk239 < ptypes239.length
+                      ptypes239[kk239] = unify_call_types(ptypes239[kk239], at239, arg_ids239[kk239])
+                    end
+                    kk239 = kk239 + 1
+                  end
+                  @meth_param_types[mi239] = ptypes239.join(",")
+                end
               end
             end
           end
@@ -21176,7 +21222,12 @@ class Compiler
           mfn = rcname + "_cls_" + mname
           mfi = find_method_idx(mfn)
           if mfi >= 0
-            ca = compile_call_args(nid)
+            # Issue #239: route through compile_call_args_with_defaults
+            # so a `def self.greet(name, msg = nil); end` inside a
+            # module accepts shorter call sites — caller-omitted
+            # trailing args get filled in from the method's recorded
+            # default expressions, the same as top-level method calls.
+            ca = compile_call_args_with_defaults(nid, mfi)
             if ca != ""
               return "sp_" + sanitize_name(mfn) + "(" + ca + ")"
             else
@@ -21196,6 +21247,50 @@ class Compiler
         if owner_ci >= 0
           owner_name = @cls_names[owner_ci]
           ca = compile_call_args(nid)
+          # Issue #239: fill in defaults for trailing params the
+          # caller omitted. `def self.greet(name, msg = nil)` with
+          # call site `C.greet("a")` would otherwise emit
+          # `sp_C_cls_greet("a")` against the 2-arg signature and
+          # the C compiler rejects with `too few arguments`. Look
+          # up the cls method's recorded defaults (parallel to
+          # @cls_meth_defaults for instance methods) and append
+          # the missing trailing exprs.
+          owner_cmnames = @cls_cmeth_names[owner_ci].split(";")
+          owner_cmptypes = @cls_cmeth_ptypes[owner_ci].split("|")
+          owner_cmdefaults = @cls_cmeth_defaults[owner_ci].split("|")
+          cmidx239 = 0
+          while cmidx239 < owner_cmnames.length
+            if owner_cmnames[cmidx239] == mname
+              break
+            end
+            cmidx239 = cmidx239 + 1
+          end
+          if cmidx239 < owner_cmnames.length && cmidx239 < owner_cmptypes.length
+            owner_pt = owner_cmptypes[cmidx239].split(",")
+            owner_df = "".split(",")
+            if cmidx239 < owner_cmdefaults.length
+              owner_df = owner_cmdefaults[cmidx239].split(",")
+            end
+            args_id239 = @nd_arguments[nid]
+            arg_count239 = 0
+            if args_id239 >= 0
+              arg_count239 = get_args(args_id239).length
+            end
+            kk239 = arg_count239
+            while kk239 < owner_pt.length
+              if kk239 < owner_df.length
+                def_id239 = owner_df[kk239].to_i
+                if def_id239 >= 0
+                  if ca == ""
+                    ca = compile_expr(def_id239)
+                  else
+                    ca = ca + ", " + compile_expr(def_id239)
+                  end
+                end
+              end
+              kk239 = kk239 + 1
+            end
+          end
           if ca != ""
             return "sp_" + owner_name + "_cls_" + sanitize_name(mname) + "(" + ca + ")"
           else
