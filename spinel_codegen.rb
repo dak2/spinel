@@ -13842,10 +13842,20 @@ class Compiler
         end
       end
     end
-    # Don't descend into nested DefNode bodies: they have their own
-    # scope and a separate phase walks each live cls method body
-    # with the correct ctx_ci.
-    if @nd_type[nid] == "DefNode"
+    # In phase A (ctx_ci < 0, walking top-level / class-body /
+    # module-body context), descend into DefNode bodies so
+    # `<Const>.<m>(...)` call sites inside instance methods get
+    # picked up — `def initialize; @x = TheClass.new_inner; end`
+    # otherwise leaves `TheClass::new_inner` un-marked and DCE
+    # drops the body while the call site remains, producing a
+    # linker error. Bare/self calls inside the descended body
+    # stay unmatched because ctx_ci is still -1.
+    #
+    # In phase B (ctx_ci >= 0, walking inside a live cls method
+    # body), skip nested DefNodes — their scope differs and
+    # bare/self calls inside should not be attributed to the
+    # outer cls method's class.
+    if @nd_type[nid] == "DefNode" && ctx_ci >= 0
       return
     end
     if @nd_body[nid] >= 0

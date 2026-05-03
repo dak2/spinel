@@ -81,7 +81,7 @@ gen2.c == gen3.c   (bootstrap loop closed)
 
 ## Benchmarks
 
-290 tests pass. 55 benchmarks pass.
+290 tests pass. 56 benchmarks pass.
 Geometric mean: **~11.6x faster** than miniruby (Ruby 4.1.0dev) across
 the 28 benchmarks below. Baseline is the latest CRuby `miniruby` build
 (without bundled gems), which is considerably faster than the system
