@@ -15046,16 +15046,23 @@ class Compiler
               if iv_ctor != ""
                 @needs_gc = 1
                 emit_raw("  " + self_arrow + ivar + " = " + iv_ctor + ";")
-              elsif is_ptr_array_type(ivt) == 1 && is_sized_empty_array_default(expr_id_iv) == 1
+              elsif (ivt == "poly_array" || is_ptr_array_type(ivt) == 1) && is_sized_empty_array_default(expr_id_iv) == 1
                 # `@arr = [nil] * N` with @arr already widened to
-                # ptr_array via writer-scan. The default `*` codegen
-                # produces an sp_IntArray that mismatches the slot
-                # type; emit a sized PtrArray of NULLs inline.
+                # poly_array (or ptr_array) via writer-scan. The
+                # default `*` codegen produces an sp_IntArray that
+                # mismatches the slot type; emit a sized PolyArray
+                # of sp_box_nil() (or PtrArray of NULLs) inline.
                 @needs_gc = 1
                 cnt_e_iv = compile_arg0(expr_id_iv)
                 tmp_iv = new_temp
-                emit_raw("  sp_PtrArray *" + tmp_iv + " = sp_PtrArray_new();")
-                emit_raw("  { mrb_int _n = " + cnt_e_iv + "; for (mrb_int _i = 0; _i < _n; _i++) sp_PtrArray_push(" + tmp_iv + ", NULL); }")
+                if ivt == "poly_array"
+                  @needs_rb_value = 1
+                  emit_raw("  sp_PolyArray *" + tmp_iv + " = sp_PolyArray_new();")
+                  emit_raw("  { mrb_int _n = " + cnt_e_iv + "; for (mrb_int _i = 0; _i < _n; _i++) sp_PolyArray_push(" + tmp_iv + ", sp_box_nil()); }")
+                else
+                  emit_raw("  sp_PtrArray *" + tmp_iv + " = sp_PtrArray_new();")
+                  emit_raw("  { mrb_int _n = " + cnt_e_iv + "; for (mrb_int _i = 0; _i < _n; _i++) sp_PtrArray_push(" + tmp_iv + ", NULL); }")
+                end
                 emit_raw("  " + self_arrow + ivar + " = " + tmp_iv + ";")
               else
                 # Issue #130: same poly-slot boxing as the general
@@ -24717,17 +24724,24 @@ class Compiler
           return
         end
       end
-      # `@arr = [nil] * N` where @arr is a ptr_array slot. The
-      # default `*` codegen produces an sp_IntArray, which mismatches
-      # the slot type and corrupts later sp_PtrArray_set calls. Emit
-      # a sized PtrArray pre-filled with NULLs inline so the slot
+      # `@arr = [nil] * N` where @arr is a poly_array (or ptr_array)
+      # slot. The default `*` codegen produces an sp_IntArray, which
+      # mismatches the slot type and corrupts later
+      # `sp_PolyArray_set(@arr, ...)` calls. Emit a sized PolyArray
+      # of sp_box_nil() (or PtrArray of NULLs) inline so the slot
       # holds the matching storage.
-      if is_ptr_array_type(ivt) == 1 && is_sized_empty_array_default(expr_id) == 1
+      if (ivt == "poly_array" || is_ptr_array_type(ivt) == 1) && is_sized_empty_array_default(expr_id) == 1
         @needs_gc = 1
         cnt_e = compile_arg0(expr_id)
         tmp_arr = new_temp
-        emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
-        emit("  { mrb_int _n = " + cnt_e + "; for (mrb_int _i = 0; _i < _n; _i++) sp_PtrArray_push(" + tmp_arr + ", NULL); }")
+        if ivt == "poly_array"
+          @needs_rb_value = 1
+          emit("  sp_PolyArray *" + tmp_arr + " = sp_PolyArray_new();")
+          emit("  { mrb_int _n = " + cnt_e + "; for (mrb_int _i = 0; _i < _n; _i++) sp_PolyArray_push(" + tmp_arr + ", sp_box_nil()); }")
+        else
+          emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
+          emit("  { mrb_int _n = " + cnt_e + "; for (mrb_int _i = 0; _i < _n; _i++) sp_PtrArray_push(" + tmp_arr + ", NULL); }")
+        end
         emit("  " + self_arrow + sanitize_ivar(iname) + " = " + tmp_arr + ";")
         return
       end
