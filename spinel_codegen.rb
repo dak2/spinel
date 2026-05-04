@@ -27024,6 +27024,27 @@ class Compiler
             return 1
           end
         end
+        # Bare `m { ... }` inside another method body of the same
+        # class — `m` is a sibling instance method, lookup happens on
+        # @current_class_idx (and its ancestors). compile_yield_method
+        # _call_stmt synthesizes `self` for rc when recv < 0.
+        if @current_class_idx >= 0
+          ci_self = @current_class_idx
+          if try_yield_or_trampoline_dispatch(nid, recv, ci_self, mname) == 1
+            return 1
+          end
+          pwalk = ci_self
+          while @cls_parents[pwalk] != ""
+            pci = find_class_idx(@cls_parents[pwalk])
+            if pci < 0
+              break
+            end
+            if try_yield_or_trampoline_dispatch(nid, recv, pci, mname) == 1
+              return 1
+            end
+            pwalk = pci
+          end
+        end
       end
       # Class method with yield, or an arity-0 instance_eval trampoline.
       # The direct-class and parent-class lookups share the same dispatch
@@ -31240,7 +31261,13 @@ class Compiler
     end
 
     recv = @nd_receiver[nid]
-    rc = compile_expr_gc_rooted(recv)
+    if recv < 0
+      # Implicit self (bare `m { ... }` inside another method body
+      # of the same class).
+      rc = "self"
+    else
+      rc = compile_expr_gc_rooted(recv)
+    end
 
     bodies = @cls_meth_bodies[cci].split(";")
     bid = -1
