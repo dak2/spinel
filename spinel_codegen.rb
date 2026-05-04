@@ -23020,6 +23020,12 @@ class Compiler
     if at == "proc" || at == "lambda"
       return "sp_box_proc(" + val + ")"
     end
+    if at == "range"
+      # sp_Range is a 16-byte value type; sp_RbVal's union is 8.
+      # sp_box_range copies the stack range onto the GC heap and
+      # boxes the pointer via SP_BUILTIN_RANGE.
+      return "sp_box_range(" + val + ")"
+    end
     if is_obj_type(at) == 1
       cname = at[4, at.length - 4]
       ci = find_class_idx(cname)
@@ -24228,19 +24234,7 @@ class Compiler
       while k < elems.length
         et = infer_type(elems[k])
         val = compile_expr(elems[k])
-        if et == "string"
-          emit("  sp_PolyArray_push(" + tmp + ", sp_box_str(" + val + "));")
-        elsif et == "float"
-          emit("  sp_PolyArray_push(" + tmp + ", sp_box_float(" + val + "));")
-        elsif et == "bool"
-          emit("  sp_PolyArray_push(" + tmp + ", sp_box_bool(" + val + "));")
-        elsif et == "nil"
-          emit("  sp_PolyArray_push(" + tmp + ", sp_box_nil());")
-        elsif et == "symbol"
-          emit("  sp_PolyArray_push(" + tmp + ", sp_box_sym(" + val + "));")
-        else
-          emit("  sp_PolyArray_push(" + tmp + ", sp_box_int(" + val + "));")
-        end
+        emit("  sp_PolyArray_push(" + tmp + ", " + box_value_to_poly(et, val) + ");")
         k = k + 1
       end
       return tmp

@@ -690,6 +690,7 @@ typedef uint64_t sp_RbValue;
 #define SP_BUILTIN_PTR_ARRAY    SP_BUILTIN_ARRAY_OF(SP_TAG_OBJ)   /* -6 */
 #define SP_BUILTIN_SYM_ARRAY    SP_BUILTIN_ARRAY_OF(SP_TAG_SYM)   /* -7 */
 #define SP_BUILTIN_PROC         (-9)                              /* sp_Proc *, distinct from any tag-based id */
+#define SP_BUILTIN_RANGE        (-10)                             /* sp_Range *, heap copy of stack-typed sp_Range when crossing into poly */
 typedef struct { int tag; int cls_id; union { mrb_int i; const char *s; mrb_float f; mrb_bool b; void *p; } v; } sp_RbVal;
 static sp_RbVal sp_box_int(mrb_int v) { sp_RbVal r; r.tag = SP_TAG_INT; r.cls_id = 0; r.v.i = v; return r; }
 static sp_RbVal sp_box_str(const char *v) { sp_RbVal r; r.tag = SP_TAG_STR; r.cls_id = 0; r.v.s = v; return r; }
@@ -708,6 +709,22 @@ static sp_RbVal sp_box_str_array(void *p)   { return sp_box_obj(p, SP_BUILTIN_ST
 static sp_RbVal sp_box_sym_array(void *p)   { return sp_box_obj(p, SP_BUILTIN_SYM_ARRAY); }
 static sp_RbVal sp_box_ptr_array(void *p)   { return sp_box_obj(p, SP_BUILTIN_PTR_ARRAY); }
 static sp_RbVal sp_box_proc(void *p)        { return sp_box_obj(p, SP_BUILTIN_PROC); }
+/* sp_Range is a 16-byte value type that doesn't fit in sp_RbVal's union
+   (max 8 bytes). When a Range crosses into a poly slot (heterogeneous
+   hash / array / param / ivar), copy it onto the GC heap and box the
+   pointer via SP_BUILTIN_RANGE. The Range has no internal pointer fields
+   so no scanner is needed. */
+static sp_RbVal sp_box_range(sp_Range v) {
+  sp_Range *p = (sp_Range *)sp_gc_alloc(sizeof(sp_Range), NULL, NULL);
+  *p = v;
+  return sp_box_obj(p, SP_BUILTIN_RANGE);
+}
+static const char *sp_Range_inspect(sp_Range *r) {
+  /* "first..last" form. Buffer sized for two int64s plus the dots. */
+  char *buf = sp_str_alloc_raw(48);
+  snprintf(buf, 48, "%lld..%lld", (long long)r->first, (long long)r->last);
+  return buf;
+}
 static void sp_poly_puts(sp_RbVal v) {
   switch (v.tag) {
     case SP_TAG_INT: printf("%lld\n", (long long)v.v.i); break;
@@ -727,6 +744,7 @@ static void sp_poly_puts(sp_RbVal v) {
         case SP_BUILTIN_STR_ARRAY: puts(sp_StrArray_inspect((sp_StrArray *)v.v.p)); break;
         case SP_BUILTIN_SYM_ARRAY: puts(sp_SymArray_inspect((sp_IntArray *)v.v.p)); break;
         case SP_BUILTIN_PTR_ARRAY: puts(sp_PtrArray_inspect((sp_PtrArray *)v.v.p)); break;
+        case SP_BUILTIN_RANGE: puts(sp_Range_inspect((sp_Range *)v.v.p)); break;
         default: printf("#<Object:0x%p>\n", v.v.p); break;
       }
       break;
@@ -751,6 +769,7 @@ static const char *sp_poly_to_s(sp_RbVal v) {
         case SP_BUILTIN_STR_ARRAY: return sp_StrArray_inspect((sp_StrArray *)v.v.p);
         case SP_BUILTIN_SYM_ARRAY: return sp_SymArray_inspect((sp_IntArray *)v.v.p);
         case SP_BUILTIN_PTR_ARRAY: return sp_PtrArray_inspect((sp_PtrArray *)v.v.p);
+        case SP_BUILTIN_RANGE: return sp_Range_inspect((sp_Range *)v.v.p);
         default: return sp_str_empty;
       }
     default: return sp_str_empty;
