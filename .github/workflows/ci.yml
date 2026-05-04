@@ -21,9 +21,20 @@ jobs:
           - os: macos-latest
             cc: clang
     env:
-      CC: ${{ matrix.cc }}
+      # `sccache <cc>` wrapper. sccache forwards through to the
+      # underlying compiler when its cache misses, so this stays
+      # transparent. `SCCACHE_GHA_ENABLED=true` tells sccache to
+      # use the GitHub Actions cache as its storage backend (set
+      # up by the sccache-action step below). PR #230 split the
+      # test/bench rules into separate compile and link steps so
+      # the compile step is in sccache's cacheable pattern.
+      CC: sccache ${{ matrix.cc }}
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v6
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
@@ -50,6 +61,10 @@ jobs:
         # -j$(...) overlaps the per-test cc invocations.
         run: make -j$(getconf _NPROCESSORS_ONLN) test OPT=-O0
 
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
+
   windows-mingw:
     name: windows-mingw
     runs-on: windows-latest
@@ -57,7 +72,8 @@ jobs:
       run:
         shell: msys2 {0}
     env:
-      CC: gcc
+      CC: sccache gcc
+      SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v6
 
@@ -69,6 +85,7 @@ jobs:
           # Reuse the pacman package set across runs — saves ~1m of
           # download/install on every job.
           cache: true
+          path-type: inherit
           install: >-
             base-devel
             mingw-w64-x86_64-toolchain
@@ -78,12 +95,20 @@ jobs:
             curl
             tar
 
+      # Install the sccache binary on the Windows-side PATH; MSYS2
+      # inherits Windows PATH (path-type: inherit, above) so the
+      # `sccache` command resolves from the bash shell that make
+      # invokes.
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: Show toolchain
         run: |
           uname -a
           gcc --version
           ruby --version
           make --version | head -1
+          sccache --version
 
       - name: Fetch libprism sources
         run: make deps
@@ -93,3 +118,7 @@ jobs:
 
       - name: Run tests
         run: make -j$(nproc) test OPT=-O0
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats
