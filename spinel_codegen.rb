@@ -2938,6 +2938,9 @@ class Compiler
         if rt == "int_str_hash"
           return "int_array"
         end
+        if rt == "sym_int_hash" || rt == "sym_str_hash" || rt == "sym_poly_hash"
+          return "sym_array"
+        end
       end
       return "str_array"
     end
@@ -3015,8 +3018,11 @@ class Compiler
     if mname == "values"
       if recv >= 0
         rt = infer_type(recv)
-        if rt == "str_str_hash" || rt == "int_str_hash"
+        if rt == "str_str_hash" || rt == "int_str_hash" || rt == "sym_str_hash"
           return "str_array"
+        end
+        if rt == "sym_poly_hash" || rt == "str_poly_hash"
+          return "poly_array"
         end
       end
       return "int_array"
@@ -12137,6 +12143,8 @@ class Compiler
     emit_raw("static mrb_bool sp_SymIntHash_has_key(sp_SymIntHash*h,sp_sym k){mrb_int idx=(mrb_int)(((mrb_int)k)&h->mask);while(h->keys[idx]>=0){if(h->keys[idx]==k)return TRUE;idx=(idx+1)&h->mask;}return FALSE;}")
     emit_raw("static mrb_int sp_SymIntHash_length(sp_SymIntHash*h){return h->len;}")
     emit_raw("static void sp_SymIntHash_delete(sp_SymIntHash*h,sp_sym k){mrb_int idx=(mrb_int)(((mrb_int)k)&h->mask);while(h->keys[idx]>=0){if(h->keys[idx]==k){h->keys[idx]=-1;h->vals[idx]=0;h->len--;mrb_int j=(idx+1)&h->mask;while(h->keys[j]>=0){mrb_int nj=(mrb_int)(((mrb_int)h->keys[j])&h->mask);if((j>idx&&(nj<=idx||nj>j))||(j<idx&&nj<=idx&&nj>j)){h->keys[idx]=h->keys[j];h->vals[idx]=h->vals[j];h->keys[j]=-1;h->vals[j]=0;idx=j;}j=(j+1)&h->mask;}return;}idx=(idx+1)&h->mask;}}")
+    emit_raw("static sp_IntArray*sp_SymIntHash_keys(sp_SymIntHash*h){sp_IntArray*a=sp_IntArray_new();for(mrb_int i=0;i<h->len;i++)sp_IntArray_push(a,(mrb_int)h->order[i]);return a;}")
+    emit_raw("static sp_IntArray*sp_SymIntHash_values(sp_SymIntHash*h){sp_IntArray*a=sp_IntArray_new();for(mrb_int i=0;i<h->len;i++)sp_IntArray_push(a,sp_SymIntHash_get(h,h->order[i]));return a;}")
     # sym_array.tally — emitted alongside sp_SymIntHash because the
     # helper depends on the typedef. sym_array storage is sp_IntArray
     # (sym ids stored as mrb_int); cast each element to sp_sym for the
@@ -12158,6 +12166,8 @@ class Compiler
     emit_raw("static mrb_bool sp_SymStrHash_has_key(sp_SymStrHash*h,sp_sym k){mrb_int idx=(mrb_int)(((mrb_int)k)&h->mask);while(h->keys[idx]>=0){if(h->keys[idx]==k)return TRUE;idx=(idx+1)&h->mask;}return FALSE;}")
     emit_raw("static mrb_int sp_SymStrHash_length(sp_SymStrHash*h){return h->len;}")
     emit_raw("static void sp_SymStrHash_delete(sp_SymStrHash*h,sp_sym k){mrb_int idx=(mrb_int)(((mrb_int)k)&h->mask);while(h->keys[idx]>=0){if(h->keys[idx]==k){h->keys[idx]=-1;h->vals[idx]=NULL;h->len--;mrb_int j=(idx+1)&h->mask;while(h->keys[j]>=0){mrb_int nj=(mrb_int)(((mrb_int)h->keys[j])&h->mask);if((j>idx&&(nj<=idx||nj>j))||(j<idx&&nj<=idx&&nj>j)){h->keys[idx]=h->keys[j];h->vals[idx]=h->vals[j];h->keys[j]=-1;h->vals[j]=NULL;idx=j;}j=(j+1)&h->mask;}return;}idx=(idx+1)&h->mask;}}")
+    emit_raw("static sp_IntArray*sp_SymStrHash_keys(sp_SymStrHash*h){sp_IntArray*a=sp_IntArray_new();for(mrb_int i=0;i<h->len;i++)sp_IntArray_push(a,(mrb_int)h->order[i]);return a;}")
+    emit_raw("static sp_StrArray*sp_SymStrHash_values(sp_SymStrHash*h){sp_StrArray*a=sp_StrArray_new();for(mrb_int i=0;i<h->len;i++)sp_StrArray_push(a,sp_SymStrHash_get(h,h->order[i]));return a;}")
     emit_raw("")
   end
 
@@ -20875,6 +20885,14 @@ class Compiler
           return "sp_SymIntHash_get((sp_SymIntHash *)(" + rc + "), " + key + ")"
         end
       end
+      if mname == "keys"
+        @needs_int_array = 1
+        return "sp_SymIntHash_keys(" + rc + ")"
+      end
+      if mname == "values"
+        @needs_int_array = 1
+        return "sp_SymIntHash_values(" + rc + ")"
+      end
     end
     if recv_type == "sym_str_hash"
       if mname == "[]"
@@ -20921,6 +20939,14 @@ class Compiler
           return "sp_SymStrHash_get((sp_SymStrHash *)(" + rc + "), " + key + ")"
         end
       end
+      if mname == "keys"
+        @needs_int_array = 1
+        return "sp_SymStrHash_keys(" + rc + ")"
+      end
+      if mname == "values"
+        @needs_str_array = 1
+        return "sp_SymStrHash_values(" + rc + ")"
+      end
     end
     if recv_type == "sym_poly_hash"
       if mname == "[]"
@@ -20937,6 +20963,15 @@ class Compiler
       end
       if mname == "any?" && @nd_block[nid] < 0
         return "(sp_SymPolyHash_length(" + rc + ") > 0)"
+      end
+      if mname == "keys"
+        @needs_int_array = 1
+        return "sp_SymPolyHash_keys(" + rc + ")"
+      end
+      if mname == "values"
+        @needs_poly_array = 1
+        @needs_rb_value = 1
+        return "sp_SymPolyHash_values(" + rc + ")"
       end
     end
     if recv_type == "str_poly_hash"
@@ -20957,6 +20992,11 @@ class Compiler
       end
       if mname == "keys"
         return "sp_StrPolyHash_keys(" + rc + ")"
+      end
+      if mname == "values"
+        @needs_poly_array = 1
+        @needs_rb_value = 1
+        return "sp_StrPolyHash_values(" + rc + ")"
       end
     end
     if recv_type == "str_int_hash"
