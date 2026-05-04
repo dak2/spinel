@@ -2953,6 +2953,13 @@ class Compiler
         if rt == "float_array"
           return "float"
         end
+        if rt == "int_array"
+          return "int"
+        end
+        # Not an array — recv has a user-defined `sample`. Defer to
+        # the user-class dispatch path instead of returning the
+        # Array#sample default of int.
+        return ""
       end
       return "int"
     end
