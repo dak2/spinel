@@ -6416,6 +6416,19 @@ class Compiler
     0
   end
 
+  def ivar_exists_in_ancestor(ci, iname)
+    if @cls_parents[ci] != ""
+      pi = find_class_idx(@cls_parents[ci])
+      if pi >= 0
+        if ivar_exists(pi, iname) == 1
+          return 1
+        end
+        return ivar_exists_in_ancestor(pi, iname)
+      end
+    end
+    0
+  end
+
   def add_ivar(ci, iname, itype, definite = 0)
     if @cls_ivar_names[ci] != ""
       @cls_ivar_names[ci] = @cls_ivar_names[ci] + ";" + iname
@@ -6501,7 +6514,19 @@ class Compiler
     if @nd_type[nid] == "InstanceVariableWriteNode"
       iname = @nd_name[nid]
       expr_first = @nd_expression[nid]
-      if ivar_exists(ci, iname) == 0
+      if ivar_exists(ci, iname) == 0 && ivar_exists_in_ancestor(ci, iname) == 1
+        # Slot is on a parent class — route the write through
+        # update_ivar_type so the parent's type widens consistently.
+        # Without this, the child re-adds the ivar to its own table
+        # with the new write's type, while the parent widens to poly
+        # via update_ivar_type's recurse, leaving the two tables
+        # disagreeing — and downstream cls_ivar_type lookups on the
+        # child see only its (narrower) entry, missing the widening.
+        vtype = infer_ivar_init_type(expr_first)
+        if vtype != "int" && vtype != "nil"
+          update_ivar_type(ci, iname, vtype)
+        end
+      elsif ivar_exists(ci, iname) == 0
         vtype = infer_ivar_init_type(expr_first)
         add_ivar(ci, iname, vtype, is_definite_ivar_init(expr_first))
       else
