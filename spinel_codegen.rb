@@ -6430,7 +6430,26 @@ class Compiler
       if names[k] == iname
         if k < types.length
           old = types[k]
-          if old == "int" || old == "nil"
+          # Heterogeneous int/nil + obj → poly when the prior write
+          # was a *definite* int/nil literal. The previous "int wins"
+          # / "nil wins" overwrite silently cast the int payload to a
+          # struct pointer, miscompiling `@x = 10; @x = Box.new` and
+          # any subsequent obj method dispatch. Widen to poly so the
+          # slot can carry either case at runtime; the dispatch path
+          # then decides per cls_id at the call site.
+          #
+          # The definiteness gate avoids false widening when "int"
+          # was just `infer_ivar_init_type`'s placeholder fallback for
+          # a CallNode rhs that's later refined to an obj type by
+          # the writer-scan / inference passes (e.g.
+          # `@m = method(:foo)` initially scans as int and a
+          # refinement promotes it to `obj_Method` — no heterogeneity
+          # to widen for).
+          if (old == "int" || old == "nil") && is_obj_type(new_type) == 1 && cls_ivar_definite_flag(ci, iname) == 1
+            types[k] = "poly"
+            @needs_rb_value = 1
+            @cls_ivar_types[ci] = types.join(";")
+          elsif old == "int" || old == "nil"
             types[k] = new_type
             @cls_ivar_types[ci] = types.join(";")
           elsif old != new_type && old != "poly"
