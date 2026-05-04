@@ -2244,6 +2244,34 @@ class Compiler
       end
     end
 
+    # `obj.attr = val` (attr-writer call) — Ruby semantics: the
+    # assignment expression evaluates to the rhs value, so the
+    # inferred type is the rhs argument's type. Without this, a
+    # chain like `@a = obj.attr = val` mistypes the outer `@a`
+    # as int because the inner call falls through to the int
+    # default.
+    if mname.length > 1 && mname[mname.length - 1] == "=" &&
+       mname != "==" && mname != "!=" && mname != "<=" && mname != ">="
+      if recv >= 0
+        rt_w = infer_type(recv)
+        if is_obj_type(rt_w) == 1
+          bname_w = mname[0, mname.length - 1]
+          bt_w = base_type(rt_w)
+          cname_w = bt_w[4, bt_w.length - 4]
+          ci_w = find_class_idx(cname_w)
+          if ci_w >= 0 && cls_has_attr_writer(ci_w, bname_w) == 1
+            args_id_w = @nd_arguments[nid]
+            if args_id_w >= 0
+              arg_ids_w = get_args(args_id_w)
+              if arg_ids_w.length > 0
+                return infer_type(arg_ids_w[0])
+              end
+            end
+          end
+        end
+      end
+    end
+
     # User-defined top-level method (bare call): take precedence over
     # name-based builtin inference so `def minmax(a,b); ... end; minmax(1,2)`
     # binds to the user def instead of Array#minmax's tuple return.
