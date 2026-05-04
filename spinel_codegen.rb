@@ -9482,9 +9482,18 @@ class Compiler
          m != "sum" && m != "min" && m != "max" && m != "minmax" &&
          m != "concat" && m != "flatten" && m != "uniq" && m != "compact" &&
          m != "slice" && m != "fetch" && m != "dig" &&
+         # Universal Object methods
          m != "freeze" && m != "frozen?" && m != "dup" && m != "clone" &&
-         m != "hash" && m != "==" && m != "!=" && m != "eql?" && m != "equal?" &&
-         m != "nil?" && m != "is_a?" && m != "kind_of?" && m != "respond_to?"
+         m != "hash" && m != "class" && m != "tap" &&
+         m != "==" && m != "!=" && m != "eql?" && m != "equal?" &&
+         m != "nil?" && m != "is_a?" && m != "kind_of?" && m != "respond_to?" &&
+         # Generic operators that exist on builtin numeric/container types
+         # too — `+` is concat on Array/String, arithmetic on Numeric;
+         # a param using just `+` is no more "user-classy" than `length`.
+         m != "+" && m != "-" && m != "*" && m != "/" && m != "%" &&
+         m != "&" && m != "|" && m != "^" && m != "~" &&
+         m != "<" && m != ">" && m != "<=" && m != ">=" && m != "<=>" &&
+         m != "===" && m != "!"
         return 0
       end
       k = k + 1
