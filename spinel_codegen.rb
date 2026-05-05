@@ -3608,21 +3608,22 @@ class Compiler
               if is_obj_type(bret) == 1
                 return bret + "_ptr_array"
               end
-              # Block returns an array (e.g.
-              # `[1, 6].map { (0..n).map { ... } }` — each outer
-              # element is itself an int_array). The outer map's
-              # result is then an array of arrays, encoded as
-              # `<inner>_ptr_array`. Only fire this for array-shaped
-              # recv (where the elements have a definite shape and
-              # ivar typing reaches the ptr_array placeholder); for
-              # range/int recv we fall through to the int_array
-              # placeholder below so a follow-up int-typed assignment
-              # to the same ivar still type-checks.
+              # Block returns a 1D array (e.g.
+              # `[1, 6].map { (0..n).map { i } }` or
+              # `(0..3).map { |i| (0..3).map { ... } }`) — each
+              # outer element is itself a 1D typed array. Encode
+              # as `<inner>_ptr_array` for the standard
+              # `arr[i][j]` dispatch shape.
               if bret == "int_array" || bret == "float_array" || bret == "str_array" || bret == "sym_array"
-                rt_recv_p = infer_type(recv)
-                if rt_recv_p != "range" && rt_recv_p != "int"
-                  return bret + "_ptr_array"
-                end
+                return bret + "_ptr_array"
+              end
+              # Block returns a deeper-nested array
+              # (`int_array_ptr_array`, `poly_array`). Encode as
+              # `poly_array` — cls_id tagging chain on the inner
+              # PolyArray pushes preserves elem type for
+              # `arr[i][j][k]` 3D dispatch.
+              if is_ptr_array_type(bret) == 1 || bret == "poly_array"
+                return "poly_array"
               end
               # poly_array bret intentionally falls through. Returning
               # poly_array_ptr_array would be more accurate, but ivars
@@ -31513,13 +31514,15 @@ class Compiler
           end
         end
       end
-      # Only handle scalar block returns inline; an array-returning
-      # block (`(0..n).map { |i| [i, ...] }`) would make this an
-      # array-of-arrays, which the int/str/float push helpers can't
-      # express. Fall through to the "0" placeholder for those — the
-      # generic int_array typing keeps any follow-up `@x = [...]`
-      # assignment to the same slot type-checking.
-      if block_ret_r != "int" && block_ret_r != "string" && block_ret_r != "float"
+      # Scalar block returns push into the matching typed array.
+      # Array-returning blocks (`(0..n).map { |i| [...] }`) produce
+      # an array-of-arrays — store each block result as a pointer
+      # in `<X>_ptr_array`. Block return types we can't express
+      # fall through to a "0" placeholder.
+      block_is_typed_array = (block_ret_r == "int_array" || block_ret_r == "str_array" ||
+                              block_ret_r == "float_array" || block_ret_r == "sym_array" ||
+                              is_ptr_array_type(block_ret_r) == 1 || block_ret_r == "poly_array")
+      if block_ret_r != "int" && block_ret_r != "string" && block_ret_r != "float" && block_is_typed_array == false
         return "0"
       end
       @needs_int_array = 1
@@ -31531,6 +31534,19 @@ class Compiler
       elsif block_ret_r == "float"
         @needs_float_array = 1
         emit("  sp_FloatArray *" + tmp_arr + " = sp_FloatArray_new();")
+      elsif block_is_typed_array
+        # Array-of-<X>: 1D-block-return uses PtrArray (matches
+        # the inferred `<bret>_ptr_array` type). Deeper nesting
+        # (block already returns ptr_array / poly_array) uses
+        # PolyArray with `box_value_to_poly` boxing — the
+        # cls_id chain stays tagged for `arr[i][j][k]...`
+        # dispatch.
+        if is_ptr_array_type(block_ret_r) == 1 || block_ret_r == "poly_array"
+          @needs_rb_value = 1
+          emit("  sp_PolyArray *" + tmp_arr + " = sp_PolyArray_new();")
+        else
+          emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
+        end
       else
         emit("  sp_IntArray *" + tmp_arr + " = sp_IntArray_new();")
       end
@@ -31594,6 +31610,12 @@ class Compiler
             emit("  sp_StrArray_push(" + tmp_arr + ", " + lastv_r + ");")
           elsif block_ret_r == "float"
             emit("  sp_FloatArray_push(" + tmp_arr + ", " + lastv_r + ");")
+          elsif block_is_typed_array
+            if is_ptr_array_type(block_ret_r) == 1 || block_ret_r == "poly_array"
+              emit("  sp_PolyArray_push(" + tmp_arr + ", " + box_value_to_poly(block_ret_r, lastv_r) + ");")
+            else
+              emit("  sp_PtrArray_push(" + tmp_arr + ", (void *)" + lastv_r + ");")
+            end
           else
             emit("  sp_IntArray_push(" + tmp_arr + ", " + lastv_r + ");")
           end
@@ -31692,9 +31714,15 @@ class Compiler
         # `[1, 6].map { (0..n).map { ... } }`) — accumulator must
         # be a PtrArray so GC keeps each element alive (an IntArray
         # accumulator with pointer-payload mrb_ints would let the
-        # inner arrays be collected).
+        # inner arrays be collected). Deeper nesting (block_ret is
+        # already a ptr_array / poly_array) uses PolyArray boxing
+        # so the cls_id chain stays tagged for `arr[i][j][k]...`.
         ret_is_arr2 = (block_ret == "int_array" || block_ret == "float_array" || block_ret == "str_array" || block_ret == "sym_array")
-        if ret_is_arr2
+        ret_is_deep_arr2 = (is_ptr_array_type(block_ret) == 1 || block_ret == "poly_array")
+        if ret_is_deep_arr2
+          @needs_rb_value = 1
+          emit("  sp_PolyArray *" + tmp_arr + " = sp_PolyArray_new();")
+        elsif ret_is_arr2
           @needs_ptr_array = 1
           emit("  sp_PtrArray *" + tmp_arr + " = sp_PtrArray_new();")
         else
@@ -31715,7 +31743,28 @@ class Compiler
           if stmts3.length > 0
             last = stmts3[stmts3.length - 1]
             val = compile_expr(last)
-            if ret_is_arr2
+            if ret_is_deep_arr2
+              # The block returns a typed `<X>_ptr_array` (e.g.
+              # `int_array_ptr_array`). The static type carries
+              # elem-type info but `sp_box_ptr_array(val)` would
+              # erase it (cls_id PTR_ARRAY only). Convert to
+              # PolyArray inline so each inner element gets its
+              # proper `sp_box_<elem>` tag — `arr[i][j][k]`
+              # dispatch then chains correctly.
+              if is_ptr_array_type(block_ret) == 1
+                inner_t = ptr_array_elem_type(block_ret)
+                conv = new_temp
+                ii = new_temp
+                emit("  sp_PolyArray *" + conv + " = sp_PolyArray_new();")
+                emit("  for (mrb_int " + ii + " = 0; " + ii + " < sp_PtrArray_length(" + val + "); " + ii + "++) {")
+                inner_get = "(" + c_type(inner_t) + ")sp_PtrArray_get(" + val + ", " + ii + ")"
+                emit("    sp_PolyArray_push(" + conv + ", " + box_value_to_poly(inner_t, inner_get) + ");")
+                emit("  }")
+                emit("  sp_PolyArray_push(" + tmp_arr + ", sp_box_poly_array(" + conv + "));")
+              else
+                emit("  sp_PolyArray_push(" + tmp_arr + ", " + box_value_to_poly(block_ret, val) + ");")
+              end
+            elsif ret_is_arr2
               emit("  sp_PtrArray_push(" + tmp_arr + ", (void *)(" + val + "));")
             else
               emit("  sp_IntArray_push(" + tmp_arr + ", " + val + ");")
