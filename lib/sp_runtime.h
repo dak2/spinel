@@ -582,7 +582,13 @@ int re_exec(const mrb_regexp_pattern *pat, const char *str, int64_t len, int64_t
 /* Regexp globals: $1-$9 captures */
 static const char *sp_re_captures[10] = {0};
 static int sp_re_caps[64];
-static const char *sp_re_last_str = "";
+/* NULL (not "") so sp_mark_string's null-guard handles the unset case
+   without reaching the `s[-1]` access. The rodata `""` literal would
+   trigger -Wstringop-overflow under -O3 + sp_mark_string inlining at
+   the call site in sp_re_mark_globals — gcc proves the `s[-1] = 0xfc`
+   write would be out-of-bounds even though the runtime guard
+   `s[-1] == 0xfe` (always false for rodata) prevents it from firing. */
+static const char *sp_re_last_str = NULL;
 
 /* Symbolic back-references populated alongside the numbered captures.
    Read by codegen's BackReferenceReadNode arm:
