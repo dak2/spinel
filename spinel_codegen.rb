@@ -28976,6 +28976,20 @@ class Compiler
     if args_id >= 0
       arg_ids = get_args(args_id)
     end
+    # Slice assignment `arr[i, n] = src`: replace n elements
+    # starting at index i with the elements of src. Same-length
+    # only (n == src.length); resize semantics not yet supported.
+    # Only fires when both sides are the same C kind — falls
+    # through otherwise to avoid silent miscompiles on mistyped
+    # inputs (e.g. an `int_array`-typed src that's actually an
+    # array-of-IntArrays would copy the wrong shape).
+    if arg_ids.length == 3 && (rt == "int_array" || rt == "float_array" || rt == "str_array" || rt == "sym_array" || is_ptr_array_type(rt) == 1 || rt == "poly_array")
+      src_t_check = infer_type(arg_ids[2])
+      if array_c_prefix(rt) == array_c_prefix(src_t_check) && (src_t_check == "int_array" || src_t_check == "float_array" || src_t_check == "str_array" || src_t_check == "sym_array" || is_ptr_array_type(src_t_check) == 1 || src_t_check == "poly_array")
+        compile_slice_assign(nid, recv, rt, rc, arg_ids)
+        return
+      end
+    end
     idx = "0"
     val = "0"
     if arg_ids.length >= 1
@@ -29050,6 +29064,44 @@ class Compiler
       emit("  sp_StrStrHash_set(" + rc + ", " + idx + ", " + val + ");")
       return
     end
+  end
+
+  # Compile `arr[start, len] = src` slice assignment. Replaces
+  # `len` elements of `arr` starting at `start` with the elements
+  # of `src`. Same-length only — `src.length` must equal `len` at
+  # runtime; resize semantics not implemented. Each index `i in
+  # 0...len` is emitted as `arr[start + i] = src[i]`.
+  def compile_slice_assign(nid, recv, rt, rc, arg_ids)
+    start_id = arg_ids[0]
+    len_id = arg_ids[1]
+    src_id = arg_ids[2]
+    src_t = infer_type(src_id)
+    start_e = compile_expr(start_id)
+    len_e = compile_expr(len_id)
+    src_e = compile_expr_gc_rooted(src_id)
+    pfx = array_c_prefix(rt)
+    src_pfx = array_c_prefix(src_t)
+    if pfx == "" || src_pfx == ""
+      return
+    end
+    rc_t = new_temp
+    src_t_v = new_temp
+    start_t = new_temp
+    ii = new_temp
+    emit("  {")
+    emit("    sp_" + pfx + " *" + rc_t + " = " + rc + ";")
+    emit("    sp_" + src_pfx + " *" + src_t_v + " = " + src_e + ";")
+    emit("    mrb_int " + start_t + " = " + start_e + ";")
+    emit("    mrb_int _n = " + len_e + ";")
+    # Inner loop: copy n elements from src to dest. Casting between
+    # array kinds isn't supported here (e.g. int_array ← float_array
+    # would silently truncate); both must be the same C kind.
+    if pfx == src_pfx
+      emit("    for (mrb_int " + ii + " = 0; " + ii + " < _n; " + ii + "++) {")
+      emit("      sp_" + pfx + "_set(" + rc_t + ", " + start_t + " + " + ii + ", sp_" + src_pfx + "_get(" + src_t_v + ", " + ii + "));")
+      emit("    }")
+    end
+    emit("  }")
   end
 
   # Compile `recv[idx] OP= value` (IndexOperatorWriteNode).
