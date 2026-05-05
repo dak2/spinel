@@ -1961,6 +1961,26 @@ class Compiler
       if @current_class_idx >= 0
         return cls_ivar_type(@current_class_idx, @nd_name[nid])
       end
+      # Issue #303: inside a module class method (`def self.foo` in
+      # `module M`, compiled as the top-level `M_cls_foo`), an ivar
+      # read like `@slots` resolves to `cst_M_slots` — already handled
+      # by compile_expr's matching arm. Mirror that resolution here so
+      # infer_type returns the slot's recorded type instead of falling
+      # through to "int", which would route `@slots[k]` through the
+      # int-bit-extract codegen even though the storage is a hash.
+      mi3 = 0
+      while mi3 < @module_names.length
+        mmod = @module_names[mi3]
+        if mmod != "" && @current_method_name.start_with?(mmod + "_cls_")
+          iname = @nd_name[nid]
+          cname3 = mmod + "_" + iname[1, iname.length - 1]
+          ci3 = find_const_idx(cname3)
+          if ci3 >= 0
+            return @const_types[ci3]
+          end
+        end
+        mi3 = mi3 + 1
+      end
       tit = toplevel_ivar_type(@nd_name[nid])
       if tit != ""
         return tit
@@ -7729,6 +7749,223 @@ class Compiler
     }
   end
 
+  # Issue #303: refine module-ivar types for empty-container literals
+  # (`@h = {}` / `@arr = []`) by walking the module's class-method
+  # bodies for `@h[k] = v` / `@h << v` style writes and picking the
+  # most specific hash / array shape from the observed key + value
+  # types. Without this the empty-hash default `str_int_hash` stays
+  # frozen and a sym-key / string-value write site emits a typed-
+  # mismatch sp_StrIntHash_set call.
+  #
+  # Called from generate_code after the param-type inference loop so
+  # `infer_type(args[i])` resolves params to their call-site-widened
+  # types — refining at module-collect time would see every param as
+  # the placeholder "int".
+  def refine_all_module_ivar_types
+    mi = 0
+    while mi < @module_names.length
+      mname_m = @module_names[mi]
+      body_m = @module_body_ids[mi]
+      if mname_m != "" && body_m >= 0
+        refine_module_ivar_types(mname_m, get_stmts(body_m))
+      end
+      mi = mi + 1
+    end
+  end
+
+  def refine_module_ivar_types(mname, body_stmts)
+    body_stmts.each { |sid|
+      next unless @nd_type[sid] == "InstanceVariableWriteNode"
+      iname = @nd_name[sid]
+      cname2 = mname + "_" + iname[1, iname.length - 1]
+      ci = find_const_idx(cname2)
+      next if ci < 0
+      cur = @const_types[ci]
+      # Only refine when the recorded type is the empty-hash default
+      # (str_int_hash) or empty-array default (int_array).
+      next unless cur == "str_int_hash" || cur == "int_array"
+      expr_id = @nd_expression[sid]
+      next unless expr_id >= 0
+      next unless (cur == "str_int_hash" && is_empty_hash_literal(expr_id) == 1) ||
+                  (cur == "int_array" && is_empty_array_literal(expr_id) == 1)
+      # Walk all class methods in the module looking for writes to
+      # this ivar.
+      key_t_set = "".split(",")
+      val_t_set = "".split(",")
+      body_stmts.each { |sid2|
+        next unless @nd_type[sid2] == "DefNode"
+        bid = @nd_body[sid2]
+        next unless bid >= 0
+        # The def's params live in the top-level method table under the
+        # synthetic `<mname>_cls_<dmname>` name. Pull the
+        # call-site-widened types from there and declare them in a
+        # temporary scope so `infer_type(LocalVariableReadNode)` for
+        # those params resolves correctly during the walk.
+        synth_name = mname + "_cls_" + @nd_name[sid2]
+        mi3 = find_method_idx(synth_name)
+        push_scope
+        if mi3 >= 0
+          pnames3 = @meth_param_names[mi3].split(",")
+          ptypes3 = @meth_param_types[mi3].split(",")
+          k3 = 0
+          while k3 < pnames3.length
+            pt3 = "int"
+            if k3 < ptypes3.length
+              pt3 = ptypes3[k3]
+            end
+            declare_var(pnames3[k3], pt3)
+            k3 = k3 + 1
+          end
+        end
+        saved_meth = @current_method_name
+        @current_method_name = synth_name
+        scan_module_ivar_writes(bid, iname, key_t_set, val_t_set)
+        @current_method_name = saved_meth
+        pop_scope
+      }
+      if cur == "str_int_hash"
+        # Pick the hash class that fits the observed (key, value) types.
+        new_t = pick_hash_class(key_t_set, val_t_set)
+        if new_t != "" && new_t != cur
+          @const_types[ci] = new_t
+          # Set the @needs_* flag so emit_sym_runtime / future hash
+          # runtime emitters declare the matching struct + helpers
+          # before this const's `cst_<name>` declaration is rendered.
+          mark_hash_needs(new_t)
+        end
+      elsif cur == "int_array"
+        new_t = pick_array_class(val_t_set)
+        if new_t != "" && new_t != cur
+          @const_types[ci] = new_t
+          mark_array_needs(new_t)
+        end
+      end
+    }
+  end
+
+  def mark_hash_needs(t)
+    if t == "sym_int_hash"
+      @needs_sym_int_hash = 1
+    elsif t == "sym_str_hash"
+      @needs_sym_str_hash = 1
+    elsif t == "str_str_hash"
+      @needs_str_str_hash = 1
+    elsif t == "int_str_hash"
+      @needs_int_str_hash = 1
+    elsif t == "sym_poly_hash"
+      @needs_sym_poly_hash = 1
+      @needs_rb_value = 1
+    elsif t == "str_poly_hash"
+      @needs_str_poly_hash = 1
+      @needs_rb_value = 1
+    end
+  end
+
+  def mark_array_needs(t)
+    if t == "float_array"
+      @needs_float_array = 1
+    elsif t == "str_array"
+      @needs_str_array = 1
+    elsif t == "poly_array"
+      @needs_rb_value = 1
+    end
+  end
+
+  # Walk `nid` accumulating distinct key + value types observed at
+  # `@<iname>[k] = v` / `@<iname> << v` style writes.
+  def scan_module_ivar_writes(nid, iname, key_t_set, val_t_set)
+    if nid < 0
+      return
+    end
+    t = @nd_type[nid]
+    if t == "CallNode"
+      mname_call = @nd_name[nid]
+      recv = @nd_receiver[nid]
+      if recv >= 0 && @nd_type[recv] == "InstanceVariableReadNode" && @nd_name[recv] == iname
+        args_id = @nd_arguments[nid]
+        if args_id >= 0
+          arg_ids = get_args(args_id)
+          if mname_call == "[]=" && arg_ids.length >= 2
+            kt = infer_type(arg_ids[0])
+            vt = infer_type(arg_ids[1])
+            uniq_push(key_t_set, kt)
+            uniq_push(val_t_set, vt)
+          elsif (mname_call == "<<" || mname_call == "push") && arg_ids.length >= 1
+            vt = infer_type(arg_ids[0])
+            uniq_push(val_t_set, vt)
+          end
+        end
+      end
+    end
+    cs = []
+    push_child_ids(nid, cs)
+    k = 0
+    while k < cs.length
+      scan_module_ivar_writes(cs[k], iname, key_t_set, val_t_set)
+      k = k + 1
+    end
+  end
+
+  def uniq_push(set, val)
+    found = 0
+    k = 0
+    while k < set.length
+      if set[k] == val
+        found = 1
+        break
+      end
+      k = k + 1
+    end
+    if found == 0
+      set.push(val)
+    end
+  end
+
+  def pick_hash_class(key_t_set, val_t_set)
+    return "" if key_t_set.length == 0 || val_t_set.length == 0
+    # Heterogeneous keys → poly hash; mixed values → poly hash too.
+    sym_keys = key_t_set.length == 1 && key_t_set[0] == "symbol"
+    str_keys = key_t_set.length == 1 && key_t_set[0] == "string"
+    int_keys = key_t_set.length == 1 && key_t_set[0] == "int"
+    int_vals = val_t_set.length == 1 && val_t_set[0] == "int"
+    str_vals = val_t_set.length == 1 && val_t_set[0] == "string"
+    if sym_keys && int_vals
+      return "sym_int_hash"
+    end
+    if sym_keys && str_vals
+      return "sym_str_hash"
+    end
+    if str_keys && int_vals
+      return "str_int_hash"
+    end
+    if str_keys && str_vals
+      return "str_str_hash"
+    end
+    if int_keys && str_vals
+      return "int_str_hash"
+    end
+    # Fall back to poly when the observed pair doesn't fit a typed hash.
+    if sym_keys
+      return "sym_poly_hash"
+    end
+    if str_keys
+      return "str_poly_hash"
+    end
+    ""
+  end
+
+  def pick_array_class(val_t_set)
+    return "" if val_t_set.length == 0
+    if val_t_set.length == 1
+      vt = val_t_set[0]
+      return "int_array" if vt == "int"
+      return "float_array" if vt == "float"
+      return "str_array" if vt == "string"
+      return "sym_array" if vt == "symbol"
+    end
+    "poly_array"
+  end
+
   # ---------- FFI declaration scanning ----------
   #
   # Each ffi_* DSL form inside a `module M ... end` body is recognized by
@@ -13049,6 +13286,19 @@ class Compiler
     infer_class_body_call_types
     infer_ivar_types_from_writers
     infer_all_returns
+    # Issue #303: param types are now stable, so module ivar refinement
+    # (which infers hash / array specialization from `@h[k] = v` writes
+    # in class-method bodies) sees the right key / value types instead
+    # of the placeholder "int" they'd carry at module-collect time.
+    # After refining, re-run return / call-type inference so methods
+    # that read or push the refined const see the new shape (e.g. a
+    # `def self.add(s); @items << s; end` whose return is now
+    # `sp_StrArray *` rather than the placeholder `sp_IntArray *`).
+    refine_all_module_ivar_types
+    infer_all_returns
+    infer_function_body_call_types
+    infer_class_body_call_types
+    infer_all_returns
     # Fix lambda return types based on call-site usage
     fix_lambda_return_types
     # Pre-detect bigint variables before feature detection
@@ -17660,7 +17910,52 @@ class Compiler
         else
           @current_lexical_scope = ""
         end
-        val = compile_expr(@const_expr_ids[i])
+        # Issue #303: when refine_module_ivar_types widened the const
+        # type from the empty-hash default `str_int_hash` to a more
+        # specific shape (sym_str_hash etc.), emit the matching
+        # `sp_<Hash>_new()` directly instead of falling through to
+        # compile_expr's default `sp_StrIntHash_new()`. Same for
+        # empty-array refinement.
+        val = ""
+        ct_init = @const_types[i]
+        eid_init = @const_expr_ids[i]
+        if is_empty_hash_literal(eid_init) == 1
+          if ct_init == "sym_int_hash"
+            val = "sp_SymIntHash_new()"
+            @needs_sym_int_hash = 1
+          elsif ct_init == "sym_str_hash"
+            val = "sp_SymStrHash_new()"
+            @needs_sym_str_hash = 1
+          elsif ct_init == "str_str_hash"
+            val = "sp_StrStrHash_new()"
+            @needs_str_str_hash = 1
+          elsif ct_init == "int_str_hash"
+            val = "sp_IntStrHash_new()"
+            @needs_int_str_hash = 1
+          elsif ct_init == "sym_poly_hash"
+            val = "sp_SymPolyHash_new()"
+            @needs_sym_poly_hash = 1
+          elsif ct_init == "str_poly_hash"
+            val = "sp_StrPolyHash_new()"
+            @needs_str_poly_hash = 1
+          end
+        elsif is_empty_array_literal(eid_init) == 1
+          if ct_init == "float_array"
+            val = "sp_FloatArray_new()"
+            @needs_float_array = 1
+          elsif ct_init == "str_array"
+            val = "sp_StrArray_new()"
+            @needs_str_array = 1
+          elsif ct_init == "sym_array"
+            val = "sp_IntArray_new()"
+          elsif ct_init == "poly_array"
+            val = "sp_PolyArray_new()"
+            @needs_rb_value = 1
+          end
+        end
+        if val == ""
+          val = compile_expr(eid_init)
+        end
         @current_lexical_scope = old_scope
         emit("  cst_" + @const_names[i] + " = " + val + ";")
         if type_is_pointer(@const_types[i]) == 1
