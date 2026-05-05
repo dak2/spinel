@@ -1103,6 +1103,16 @@ static int flatten(pm_node_t *node) {
     R("old_name", n->old_name);
     break;
   }
+  case PM_POST_EXECUTION_NODE: {
+    /* `END { ... }`. CRuby runs END blocks in REVERSE registration
+       order at program exit. Spinel emits each as a static C
+       function and registers them via atexit() at main() startup --
+       atexit naturally invokes handlers LIFO, matching CRuby. */
+    pm_post_execution_node_t *n = (pm_post_execution_node_t *)node;
+    N("PostExecutionNode");
+    R("statements", n->statements);
+    break;
+  }
   case PM_PRE_EXECUTION_NODE: {
     /* `BEGIN { ... }`. CRuby runs all BEGIN blocks in source order
        BEFORE any other top-level statements. Spinel collects the
