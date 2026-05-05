@@ -31790,6 +31790,8 @@ class Compiler
       cond = compile_expr_remap(@nd_predicate[nid], map_from, map_to)
       emit("  while (" + cond + ") {")
       @indent = @indent + 1
+      redo_label = push_redo_label
+      emit_redo_label(redo_label)
       body = @nd_body[nid]
       if body >= 0
         stmts = get_stmts(body)
@@ -31799,6 +31801,7 @@ class Compiler
           sk = sk + 1
         end
       end
+      pop_redo_label
       @indent = @indent - 1
       emit("  }")
       @in_loop = old
@@ -32185,6 +32188,8 @@ class Compiler
       emit("  for (mrb_int " + tmp + " = 0; " + tmp + " < sp_IntArray_length(" + recv_expr + "); " + tmp + "++) {")
       emit("    lv_" + inner_bp_remapped + " = sp_IntArray_get(" + recv_expr + ", " + tmp + ");")
       @indent = @indent + 1
+      redo_label = push_redo_label
+      emit_redo_label(redo_label)
       # Compile inner block body, replacing yield with outer block body
       inner_blk = @nd_block[nid]
       if inner_blk >= 0
@@ -32224,6 +32229,7 @@ class Compiler
           end
         end
       end
+      pop_redo_label
       @indent = @indent - 1
       emit("  }")
     end
