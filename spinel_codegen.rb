@@ -5283,13 +5283,55 @@ class Compiler
   # Sentinel value for Stage 2 switch dispatch. Each module's index in
   # `@module_names` doubles as its sentinel id; reading `Module` as a
   # value lowers to this integer.
+  # Issue #304: look up the return type of a `<class_or_module>.<mname>`
+  # singleton method, walking @meth_* (module / synthetic top-level
+  # form) and @cls_cmeth_* (in-class `def self.X`). Returns "" when
+  # the method isn't registered. Used by the module-dispatch ternary
+  # default-tail and per-arm boxing paths.
+  def lookup_cls_meth_return(cn, mname)
+    mid = find_method_idx(cn + "_cls_" + mname)
+    if mid >= 0
+      return @meth_return_types[mid]
+    end
+    cci = find_class_idx(cn)
+    if cci >= 0
+      cmnames = @cls_cmeth_names[cci].split(";")
+      ki = 0
+      while ki < cmnames.length
+        if cmnames[ki] == mname
+          cmrets = @cls_cmeth_returns[cci].split(";")
+          if ki < cmrets.length
+            return cmrets[ki]
+          end
+        end
+        ki = ki + 1
+      end
+    end
+    ""
+  end
+
   def module_sentinel(mname)
+    # Module-singleton accessors hold either a module reference (rare)
+    # or a class reference (the strategy-pattern shape: `Disp.adapter
+    # = A` / `Disp.adapter = B`). Both must produce *distinct* sentinel
+    # values so the dispatch ternary's per-candidate `slot == sentinel`
+    # arms don't all collapse to the same comparison. Issue #304: the
+    # class case used to fall through to 0 here, leaving every
+    # candidate's `slot == 0` arm matching the never-written default
+    # and the rest of the chain unreachable.
     i = 0
     while i < @module_names.length
       if @module_names[i] == mname
         return i + 1
       end
       i = i + 1
+    end
+    ci = find_class_idx(mname)
+    if ci >= 0
+      # Reserve [1 .. @module_names.length] for module sentinels and
+      # offset class sentinels above that range so the two namespaces
+      # don't collide.
+      return @module_names.length + 1 + ci
     end
     0
   end
@@ -9447,6 +9489,59 @@ class Compiler
                     kk239 = kk239 + 1
                   end
                   @meth_param_types[mi239] = ptypes239.join(",")
+                end
+              end
+            end
+          end
+        end
+      end
+      # Issue #304: module-dispatch ternary call sites
+      # (`Disp.adapter.method(args)` where Disp.adapter resolves to N
+      # candidate classes via the module-singleton-accessor table).
+      # The dispatch ternary calls every candidate's class method, so
+      # all of them need the args' types unified into their per-class
+      # @cls_cmeth_ptypes entry. Without this the ternary arms type-
+      # mismatch when the caller passes a poly value but the targets'
+      # params are still mrb_int.
+      if @nd_type[nid] == "CallNode" && @nd_receiver[nid] >= 0
+        outer_recv_304 = @nd_receiver[nid]
+        if @nd_type[outer_recv_304] == "CallNode"
+          inner_recv_304 = @nd_receiver[outer_recv_304]
+          inner_mname_304 = @nd_name[outer_recv_304]
+          if inner_recv_304 >= 0 && @nd_type[inner_recv_304] == "ConstantReadNode"
+            mod_name_304 = @nd_name[inner_recv_304]
+            if module_name_exists(mod_name_304) == 1
+              rconsts_304 = module_acc_resolved(mod_name_304, inner_mname_304)
+              if rconsts_304 != "" && rconsts_304 != "?"
+                cands_304 = rconsts_304.split(";")
+                outer_mname_304 = @nd_name[nid]
+                args_id_304 = @nd_arguments[nid]
+                if args_id_304 >= 0
+                  arg_ids_304 = get_args(args_id_304)
+                  cands_304.each { |cn_304|
+                    cci_304 = find_class_idx(cn_304)
+                    if cci_304 >= 0
+                      cmnames_304 = @cls_cmeth_names[cci_304].split(";")
+                      cmpall_304 = @cls_cmeth_ptypes[cci_304].split("|")
+                      cmidx_304 = 0
+                      while cmidx_304 < cmnames_304.length
+                        if cmnames_304[cmidx_304] == outer_mname_304 && cmidx_304 < cmpall_304.length
+                          cmpt_304 = cmpall_304[cmidx_304].split(",")
+                          kk_304 = 0
+                          while kk_304 < arg_ids_304.length
+                            at_304 = infer_type(arg_ids_304[kk_304])
+                            if kk_304 < cmpt_304.length
+                              cmpt_304[kk_304] = unify_call_types(cmpt_304[kk_304], at_304, arg_ids_304[kk_304])
+                            end
+                            kk_304 = kk_304 + 1
+                          end
+                          cmpall_304[cmidx_304] = cmpt_304.join(",")
+                          @cls_cmeth_ptypes[cci_304] = cmpall_304.join("|")
+                        end
+                        cmidx_304 = cmidx_304 + 1
+                      end
+                    end
+                  }
                 end
               end
             end
@@ -19365,14 +19460,42 @@ class Compiler
             end
             # Stage 2: sentinel switch. The slot stores the assigned
             # module's sentinel; we walk the candidate list and dispatch
-            # the first match. Default `0` mirrors the un-initialised
-            # slot value (slot was zero-init, never written before read).
+            # the first match. The default tail must match the call's
+            # return type — when widening pushed the candidates to a
+            # poly return (issue #304), a literal `0` would type-mismatch
+            # the ternary's other arms. Use c_default_val of the unified
+            # return type the type system has already computed for us.
             slot = "sp_module_" + mod_name + "_" + sanitize_name(inner_mname)
-            expr = "0"
+            ret_t_d = ""
+            cands.each { |cn_d|
+              rt_d = lookup_cls_meth_return(cn_d, mname)
+              if rt_d != ""
+                if ret_t_d == ""
+                  ret_t_d = rt_d
+                elsif ret_t_d != rt_d
+                  ret_t_d = "poly"
+                end
+              end
+            }
+            ret_t_d = "int" if ret_t_d == ""
+            default_tail = c_default_val(ret_t_d)
+            if ret_t_d == "poly"
+              @needs_rb_value = 1
+              default_tail = "sp_box_nil()"
+            end
+            expr = default_tail
             ki = cands.length - 1
             while ki >= 0
               cn = cands[ki]
               call_c = "sp_" + cn + "_cls_" + sanitize_name(mname) + "(" + arg_strs + ")"
+              # Box per-arm calls when the unified return is poly but
+              # this candidate's specific return is something narrower.
+              if ret_t_d == "poly"
+                arm_rt = lookup_cls_meth_return(cn, mname)
+                if arm_rt != "" && arm_rt != "poly"
+                  call_c = box_value_to_poly(arm_rt, call_c)
+                end
+              end
               expr = "((" + slot + " == " + module_sentinel(cn).to_s + ") ? " + call_c + " : " + expr + ")"
               ki = ki - 1
             end
